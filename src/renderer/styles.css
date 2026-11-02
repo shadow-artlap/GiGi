@@ -1,0 +1,153 @@
+:root {
+  --bg: #15171c;
+  --rail: #1d2027;
+  --rail-hover: #272b34;
+  --accent: #6366f1;
+  --accent-2: #7c3aed;
+  --text: #e7e9ee;
+  --muted: #9aa0ac;
+  --danger: #ef4444;
+  --ok: #22c55e;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.4 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  user-select: none;
+}
+
+#app { display: flex; height: 100vh; }
+
+/* ---- Sidebar ---- */
+#sidebar {
+  width: 72px;
+  flex: 0 0 72px;
+  background: var(--rail);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 10px 0;
+  gap: 8px;
+  overflow-y: auto;
+  border-right: 1px solid #000a;
+}
+#sidebar::-webkit-scrollbar { width: 0; }
+
+.services { display: flex; flex-direction: column; gap: 8px; width: 100%; align-items: center; }
+
+.rail-btn {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  border: none;
+  border-radius: 14px;
+  background: var(--rail-hover);
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: visible;
+  transition: border-radius .15s ease, background .15s ease, transform .05s;
+}
+.rail-btn:hover { border-radius: 16px; background: #30343f; }
+.rail-btn:active { transform: scale(0.95); }
+.rail-btn img { width: 28px; height: 28px; border-radius: 6px; object-fit: contain; }
+
+.rail-btn.active { box-shadow: inset 0 0 0 2px var(--accent); }
+.rail-btn.active::before {
+  content: "";
+  position: absolute;
+  left: -10px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 4px; height: 24px;
+  border-radius: 0 4px 4px 0;
+  background: var(--accent);
+}
+
+.rail-btn .badge {
+  position: absolute;
+  top: -4px; right: -4px;
+  min-width: 18px; height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 11px; font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  box-shadow: 0 0 0 2px var(--rail);
+}
+.rail-btn .badge.hidden { display: none; }
+
+.rail-btn.add { background: transparent; color: var(--ok); font-size: 26px; }
+.rail-btn.add:hover { background: var(--rail-hover); }
+
+/* ---- Stage ---- */
+#stage { flex: 1; position: relative; background: #0f1115; }
+.webviews, webview { position: absolute; inset: 0; width: 100%; height: 100%; }
+webview { border: 0; }
+webview.hidden { display: none; }
+
+.empty {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; color: var(--muted);
+}
+.empty h1 { color: var(--text); margin: 0; font-size: 28px; }
+.empty.hidden { display: none; }
+
+/* ---- Buttons / dialog ---- */
+button.primary {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #fff; border: none; border-radius: 10px;
+  padding: 9px 16px; font-weight: 600; cursor: pointer;
+}
+button.primary:hover { filter: brightness(1.08); }
+button.ghost {
+  background: transparent; color: var(--muted);
+  border: 1px solid #ffffff22; border-radius: 10px;
+  padding: 9px 16px; cursor: pointer;
+}
+button.ghost:hover { color: var(--text); border-color: #ffffff44; }
+
+dialog {
+  border: none; border-radius: 16px; padding: 0;
+  background: #1b1e26; color: var(--text);
+  width: 380px; box-shadow: 0 20px 60px #000a;
+}
+dialog::backdrop { background: #0008; backdrop-filter: blur(2px); }
+#svcForm { padding: 22px; display: flex; flex-direction: column; gap: 14px; }
+#svcForm h2 { margin: 0 0 4px; font-size: 18px; }
+#svcForm label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted); }
+#svcForm input {
+  background: #0f1115; border: 1px solid #ffffff1a; border-radius: 10px;
+  padding: 10px 12px; color: var(--text); font-size: 14px; user-select: text;
+}
+#svcForm input:focus { outline: none; border-color: var(--accent); }
+.hint { font-size: 12px; color: var(--muted); margin: 0; }
+.row { display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }
+
+/* Right-click context menu */
+#ctx {
+  position: fixed; z-index: 50;
+  background: #22262f; border: 1px solid #ffffff1a; border-radius: 10px;
+  padding: 6px; min-width: 150px; box-shadow: 0 12px 30px #000a;
+}
+#ctx.hidden { display: none; }
+#ctx button {
+  display: block; width: 100%; text-align: left;
+  background: transparent; border: none; color: var(--text);
+  padding: 8px 10px; border-radius: 7px; cursor: pointer; font-size: 13px;
+}
+#ctx button:hover { background: #ffffff12; }
+#ctx button.danger:hover { background: #ef444433; color: #fca5a5; }

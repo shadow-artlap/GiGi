@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; script-src 'self';" />
+  <title>LocalHub</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Left rail: one button per service -->
+    <nav id="sidebar">
+      <div id="services" class="services"></div>
+      <button id="addBtn" class="rail-btn add" title="Add a service">+</button>
+    </nav>
+
+    <!-- Right side: stacked webviews, one shown at a time -->
+    <main id="stage">
+      <div id="webviews" class="webviews"></div>
+      <div id="empty" class="empty hidden">
+        <h1>LocalHub</h1>
+        <p>Add your first service to get started.</p>
+        <button id="emptyAdd" class="primary">Add a service</button>
+      </div>
+    </main>
+  </div>
+
+  <!-- Add / edit dialog -->
+  <dialog id="dialog">
+    <form method="dialog" id="svcForm">
+      <h2 id="dlgTitle">Add a service</h2>
+      <label>Name
+        <input id="svcName" type="text" placeholder="e.g. WhatsApp (Work)" required />
+      </label>
+      <label>URL
+        <input id="svcUrl" type="url" placeholder="https://web.whatsapp.com/" required />
+      </label>
+      <p class="hint">Add the same service twice for two independent logins — each keeps its own session.</p>
+      <div class="row">
+        <button value="cancel" class="ghost" type="submit" formnovalidate>Cancel</button>
+        <button value="ok" class="primary" id="svcSave" type="submit">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

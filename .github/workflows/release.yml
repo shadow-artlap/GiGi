@@ -1,0 +1,34 @@
+name: Release
+
+# Build and publish a Windows installer to GitHub Releases whenever a version
+# tag (e.g. v1.0.1) is pushed. electron-updater in the app then picks it up.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Generate icon
+        run: npm run icon
+
+      - name: Build and publish installer
+        run: npx electron-builder --win --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
