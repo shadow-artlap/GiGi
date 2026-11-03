@@ -33,9 +33,29 @@ function normalizeUrl(raw) {
   return u;
 }
 
+// The partition decides which cookie/storage jar a tab uses.
+// - Private: a unique jar per tab (persist:<id>) → fully isolated account.
+// - Shared:  one jar per site origin (persist:shared:<origin>) → every "Shared"
+//   tab of the same site is the same login/data.
+function partitionFor(svc) {
+  if (svc.shared) {
+    let origin;
+    try { origin = new URL(normalizeUrl(svc.url)).origin; } catch (_) { origin = svc.url; }
+    return 'persist:shared:' + origin;
+  }
+  return 'persist:' + svc.id;
+}
+
+function dropView(id) {
+  const entry = views.get(id);
+  if (entry) { entry.webview.remove(); entry.button.remove(); views.delete(id); }
+}
+
 // ---- Persistence ------------------------------------------------------------
 async function persist() {
-  await window.hub.saveServices(services.map(({ id, name, url }) => ({ id, name, url })));
+  await window.hub.saveServices(
+    services.map(({ id, name, url, shared }) => ({ id, name, url, shared: !!shared }))
+  );
 }
 
 // ---- Rendering --------------------------------------------------------------
@@ -47,12 +67,17 @@ function render() {
     seen.add(svc.id);
     let entry = views.get(svc.id);
 
+    // A webview's partition is fixed once created; if the mode/origin changed,
+    // drop the old webview so it is rebuilt with the new jar.
+    if (entry && entry.partition !== partitionFor(svc)) { dropView(svc.id); entry = null; }
+
     // Create the webview once, lazily reused afterwards.
     if (!entry) {
+      const partition = partitionFor(svc);
       const webview = document.createElement('webview');
       webview.className = 'hidden';
       webview.setAttribute('src', svc.url);
-      webview.setAttribute('partition', 'persist:' + svc.id); // isolated session per service
+      webview.setAttribute('partition', partition);
       webview.setAttribute('preload', window.hub.webviewPreload);
       webview.setAttribute('allowpopups', 'true');
       webview.setAttribute('useragent',
@@ -86,7 +111,7 @@ function render() {
         showContextMenu(ev.clientX, ev.clientY, svc.id);
       });
 
-      entry = { webview, button };
+      entry = { webview, button, partition };
       views.set(svc.id, entry);
       webviewsEl.appendChild(webview);
     }
@@ -134,6 +159,15 @@ function paintButton(svc, button) {
   const badge = document.createElement('span');
   badge.className = 'badge hidden';
   button.appendChild(badge);
+
+  if (svc.shared) {
+    const mark = document.createElement('span');
+    mark.className = 'link-mark';
+    mark.title = 'Shared login';
+    mark.textContent = '🔗';
+    button.appendChild(mark);
+  }
+
   button.classList.toggle('active', svc.id === activeId);
 }
 
@@ -193,8 +227,25 @@ function showContextMenu(x, y, id) {
     b.addEventListener('click', (e) => { e.stopPropagation(); hideContextMenu(); fn(); });
     ctx.appendChild(b);
   };
+  const svc = services.find((s) => s.id === id);
   add('Reload', () => { const v = views.get(id); if (v) v.webview.reload(); });
   add('Edit…', () => openDialog(id));
+  add(svc && svc.shared ? 'Switch to Private' : 'Switch to Shared', () => {
+    const s = services.find((x) => x.id === id);
+    if (!s) return;
+    s.shared = !s.shared;
+    dropView(id);        // partition changes → rebuild the tab with the new jar
+    persist();
+    render();
+  });
+  add('Duplicate', () => {
+    const s = services.find((x) => x.id === id);
+    if (!s) return;
+    // A Shared duplicate joins the same login; a Private duplicate is a new account.
+    services.splice(idx + 1, 0, { id: uid(), name: s.name, url: s.url, shared: !!s.shared });
+    persist();
+    render();
+  });
   if (idx > 0) add('Move up', () => { swap(idx, idx - 1); });
   if (idx < services.length - 1) add('Move down', () => { swap(idx, idx + 1); });
   add('Remove', () => removeService(id), true);
@@ -227,6 +278,9 @@ function openDialog(id) {
   dlgTitle.textContent = svc ? 'Edit service' : 'Add a service';
   nameInput.value = svc ? svc.name : '';
   urlInput.value = svc ? svc.url : '';
+  const mode = svc && svc.shared ? 'shared' : 'private';
+  const radio = form.querySelector(`input[name="mode"][value="${mode}"]`);
+  if (radio) radio.checked = true;
   dialog.showModal();
   nameInput.focus();
 }
@@ -240,18 +294,22 @@ form.addEventListener('submit', (e) => {
   const name = nameInput.value.trim();
   const url = normalizeUrl(urlInput.value);
   if (!name || !url) return;
+  const shared = (form.querySelector('input[name="mode"]:checked') || {}).value === 'shared';
 
   if (editingId) {
     const svc = services.find((s) => s.id === editingId);
-    const urlChanged = svc.url !== url;
+    const before = partitionFor(svc);
     svc.name = name;
     svc.url = url;
-    if (urlChanged) {
-      const entry = views.get(editingId);
-      if (entry) entry.webview.setAttribute('src', url);
+    svc.shared = shared;
+    if (partitionFor(svc) !== before) {
+      dropView(svc.id);          // jar changed → rebuild on next render
+    } else {
+      const entry = views.get(svc.id);
+      if (entry && entry.webview.getAttribute('src') !== url) entry.webview.setAttribute('src', url);
     }
   } else {
-    services.push({ id: uid(), name, url });
+    services.push({ id: uid(), name, url, shared });
   }
   editingId = null;
   dialog.close();
@@ -266,7 +324,7 @@ document.getElementById('emptyAdd').addEventListener('click', () => openDialog(n
 (async function init() {
   services = await window.hub.getServices();
   // Make sure every service has a stable id.
-  services = services.map((s) => ({ id: s.id || uid(), name: s.name, url: s.url }));
+  services = services.map((s) => ({ id: s.id || uid(), name: s.name, url: s.url, shared: !!s.shared }));
   render();
   await persist();
 })();

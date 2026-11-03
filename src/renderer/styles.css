@@ -89,6 +89,14 @@ html, body {
 }
 .rail-btn .badge.hidden { display: none; }
 
+.rail-btn .link-mark {
+  position: absolute;
+  bottom: -3px; left: -3px;
+  font-size: 11px; line-height: 1;
+  filter: drop-shadow(0 0 1px #000a);
+  pointer-events: none;
+}
+
 .rail-btn.add { background: transparent; color: var(--ok); font-size: 26px; }
 .rail-btn.add:hover { background: var(--rail-hover); }
 
@@ -135,6 +143,21 @@ dialog::backdrop { background: #0008; backdrop-filter: blur(2px); }
 }
 #svcForm input:focus { outline: none; border-color: var(--accent); }
 .hint { font-size: 12px; color: var(--muted); margin: 0; }
+
+.modes {
+  border: 1px solid #ffffff1a; border-radius: 10px;
+  padding: 10px 12px; margin: 0;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.modes legend { font-size: 12px; color: var(--muted); padding: 0 4px; }
+#svcForm .mode {
+  flex-direction: row; align-items: flex-start; gap: 8px;
+  font-size: 12px; color: var(--text); cursor: pointer;
+}
+#svcForm .mode input[type="radio"] {
+  width: auto; margin: 2px 0 0; padding: 0; background: none; border: none; accent-color: var(--accent);
+}
+#svcForm .mode b { color: var(--text); }
 .row { display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }
 
 /* Right-click context menu */
