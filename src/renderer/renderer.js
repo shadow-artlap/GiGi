@@ -1,6 +1,6 @@
 'use strict';
 
-// LocalHub renderer: owns the sidebar and the stack of <webview> elements.
+// GiGi renderer: owns the sidebar and the stack of <webview> elements.
 // Config is loaded from / saved to the main process (local JSON file).
 
 const servicesEl = document.getElementById('services');

@@ -25,9 +25,6 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Generate icon
-        run: npm run icon
-
       - name: Build and publish installer
         run: npx electron-builder --win --publish always
         env:

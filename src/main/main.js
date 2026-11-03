@@ -55,7 +55,7 @@ function createWindow() {
     minHeight: 560,
     backgroundColor: '#15171c',
     icon: fs.existsSync(ICON_FILE) ? ICON_FILE : undefined,
-    title: 'LocalHub',
+    title: 'GiGi',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -82,9 +82,9 @@ function createWindow() {
 
 function createTray() {
   tray = new Tray(trayImage());
-  tray.setToolTip('LocalHub');
+  tray.setToolTip('GiGi');
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label: 'Show LocalHub', click: () => { win.show(); win.focus(); } },
+    { label: 'Show GiGi', click: () => { win.show(); win.focus(); } },
     { type: 'separator' },
     { label: 'Quit', click: () => { isQuitting = true; app.quit(); } }
   ]));
@@ -115,7 +115,7 @@ function initUpdater() {
       defaultId: 0,
       cancelId: 1,
       title: 'Update ready',
-      message: `LocalHub ${info.version} has been downloaded.`,
+      message: `GiGi ${info.version} has been downloaded.`,
       detail: 'Restart the app to install the new version.'
     }).then(({ response }) => {
       if (response === 0) { isQuitting = true; autoUpdater.quitAndInstall(); }
@@ -154,7 +154,7 @@ ipcMain.on('badge:set', (_e, countRaw) => {
   const count = Number(countRaw) || 0;
   try { app.setBadgeCount(count); } catch (_) { /* unsupported platform */ }
   if (process.platform === 'darwin' && app.dock) app.dock.setBadge(count ? String(count) : '');
-  if (tray) tray.setToolTip(count ? `LocalHub — ${count} unread` : 'LocalHub');
+  if (tray) tray.setToolTip(count ? `GiGi — ${count} unread` : 'GiGi');
 });
 
 ipcMain.on('window:flash', () => {

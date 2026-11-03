@@ -1,4 +1,4 @@
-# LocalHub
+# GiGi
 
 A **local, all-in-one messenger** — combine many web services (WhatsApp, Telegram,
 Gmail, Slack, Discord, …) in one window, each with its own isolated login, plus
@@ -32,7 +32,6 @@ stored locally and separately.
 
 ```bash
 npm install
-npm run icon
 npm start
 ```
 
@@ -41,7 +40,7 @@ npm start
 - Service list: `<userData>/services.json`
 - Per-service logins: `<userData>/Partitions/<id>/`
 
-On Windows `<userData>` is `%APPDATA%\LocalHub`.
+On Windows `<userData>` is `%APPDATA%\GiGi`.
 
 ## Auto-update via GitHub Releases
 

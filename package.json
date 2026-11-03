@@ -1,14 +1,13 @@
 {
-  "name": "localhub",
-  "productName": "LocalHub",
+  "name": "gigi",
+  "productName": "GiGi",
   "version": "1.0.0",
-  "description": "Local all-in-one messenger — combine many web services and accounts in one window, with notifications and unread counters. 100% local config, no cloud account, no telemetry.",
+  "description": "GiGi — a local all-in-one messenger. Combine many web services and accounts in one window, with notifications and unread counters. 100% local config, no cloud account, no telemetry.",
   "main": "src/main/main.js",
-  "author": "LocalHub",
+  "author": "GiGi",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "icon": "node gen-icon.js",
     "dist": "electron-builder"
   },
   "dependencies": {
@@ -19,8 +18,8 @@
     "electron-builder": "^25.1.8"
   },
   "build": {
-    "appId": "com.localhub.app",
-    "productName": "LocalHub",
+    "appId": "com.gigi.app",
+    "productName": "GiGi",
     "files": [
       "src/**/*",
       "assets/**/*",
@@ -48,7 +47,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "LocalHub"
+      "shortcutName": "GiGi"
     }
   }
 }
