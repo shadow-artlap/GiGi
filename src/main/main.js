@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, dialog } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, dialog, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -172,6 +172,31 @@ ipcMain.handle('config:save', (_e, config) => saveConfig(config));
 
 // Let the user pick an image for a group; return it as a small 64x64 PNG data URL
 // so it stores inline in the config (no extra files to manage).
+// Real mute / Do Not Disturb: the renderer sends the partitions whose
+// notifications should be blocked. We deny the 'notifications' permission on
+// those sessions (and allow it again when they leave the set), which stops the
+// OS toast and its sound at the source — not just GiGi's own taskbar flash.
+const ALLOWED_PERMS = ['notifications', 'media', 'clipboard-read', 'fullscreen', 'pointerLock'];
+let notifyBlocked = new Set();
+
+function setPartitionNotify(partition, deny) {
+  try {
+    const ses = session.fromPartition(partition);
+    const handler = (_wc, perm) => (perm === 'notifications' ? !deny : ALLOWED_PERMS.includes(perm));
+    ses.setPermissionCheckHandler(handler);
+    ses.setPermissionRequestHandler((_wc, perm, cb) => cb(perm === 'notifications' ? !deny : ALLOWED_PERMS.includes(perm)));
+  } catch (err) {
+    console.error('setPartitionNotify failed for', partition, err);
+  }
+}
+
+ipcMain.on('notify:block-set', (_e, partitions) => {
+  const next = new Set(Array.isArray(partitions) ? partitions : []);
+  for (const p of notifyBlocked) if (!next.has(p)) setPartitionNotify(p, false); // unblock
+  for (const p of next) setPartitionNotify(p, true);                             // block
+  notifyBlocked = next;
+});
+
 ipcMain.handle('group:pick-icon', async () => {
   const res = await dialog.showOpenDialog(win, {
     title: 'Choose a group image',

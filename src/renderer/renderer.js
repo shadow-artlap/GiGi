@@ -22,6 +22,7 @@ const groupDlgTitle = document.getElementById('groupDlgTitle');
 const groupIconPreview = document.getElementById('groupIconPreview');
 const pickIconBtn = document.getElementById('pickIconBtn');
 const removeIconBtn = document.getElementById('removeIconBtn');
+const dndBtn = document.getElementById('dndBtn');
 
 // config = { version, activeGroupId,
 //            groups: [{ id, name, icon?, activeServiceId?, services:[{id,name,url,shared}] }] }
@@ -71,6 +72,23 @@ async function persist() {
   await window.hub.saveConfig(config);
 }
 
+// Tell main which partitions must have notifications blocked (muted tabs, or all
+// tabs while Do Not Disturb is on). This silences the OS toast + sound at source.
+function syncNotifyBlocks() {
+  const blocked = [];
+  config.groups.forEach((g) => g.services.forEach((svc) => {
+    if (config.dnd || svc.muted) blocked.push(partitionFor(svc, g));
+  }));
+  window.hub.setNotifyBlock(blocked);
+}
+
+function paintDnd() {
+  dndBtn.classList.toggle('on', !!config.dnd);
+  dndBtn.title = config.dnd
+    ? 'Do Not Disturb is on — click to resume alerts'
+    : 'Do Not Disturb — silence all alerts';
+}
+
 // Paint a round icon element (letter or image) for a group.
 function paintGroupIcon(el, group) {
   el.innerHTML = '';
@@ -103,14 +121,15 @@ function createView(svc, partition) {
   });
   webview.addEventListener('ipc-message', (e) => {
     const activeId = activeGroup().activeServiceId;
+    const alerts = !config.dnd && !svc.muted; // GiGi's own taskbar flash
     if (e.channel === 'unread') {
       const prev = unread.get(svc.id) || 0;
       const now = e.args[0] || 0;
       unread.set(svc.id, now);
-      if (now > prev && (svc.id !== activeId || !document.hasFocus())) window.hub.flash();
+      if (alerts && now > prev && (svc.id !== activeId || !document.hasFocus())) window.hub.flash();
       refreshBadges();
     } else if (e.channel === 'notify') {
-      if (svc.id !== activeId || !document.hasFocus()) window.hub.flash();
+      if (alerts && (svc.id !== activeId || !document.hasFocus())) window.hub.flash();
     }
   });
 
@@ -173,6 +192,8 @@ function render() {
 
   emptyEl.classList.toggle('hidden', g.services.length > 0);
   refreshBadges();
+  paintDnd();
+  syncNotifyBlocks();
 }
 
 function paintButton(svc, button, activeId) {
@@ -192,14 +213,8 @@ function paintButton(svc, button, activeId) {
   badge.className = 'badge hidden';
   button.appendChild(badge);
 
-  if (svc.shared) {
-    const mark = document.createElement('span');
-    mark.className = 'link-mark';
-    mark.title = 'Shared login (within this group)';
-    mark.textContent = '🔗';
-    button.appendChild(mark);
-  }
-
+  button.classList.toggle('shared', !!svc.shared);
+  button.classList.toggle('muted', !!svc.muted);
   button.classList.toggle('active', svc.id === activeId);
 }
 
@@ -259,10 +274,12 @@ function openMenu(x, y, items) {
   menu.innerHTML = '';
   items.forEach((it) => {
     if (it.sep) { const d = document.createElement('div'); d.className = 'menu-sep'; menu.appendChild(d); return; }
+    if (it.head) { const h = document.createElement('div'); h.className = 'menu-head'; h.textContent = it.head; menu.appendChild(h); return; }
     const b = document.createElement('button');
     b.textContent = it.label;
     if (it.danger) b.className = 'danger';
     if (it.checked) b.classList.add('checked');
+    if (it.indent) b.classList.add('indent');
     b.addEventListener('click', (e) => { e.stopPropagation(); hideMenu(); it.fn(); });
     menu.appendChild(b);
   });
@@ -284,12 +301,24 @@ function showServiceMenu(x, y, id) {
         svc.shared = !svc.shared; dropView(id); persist(); render();
       } },
     { label: 'Duplicate', fn: () => {
-        g.services.splice(idx + 1, 0, { id: uid(), name: svc.name, url: svc.url, shared: !!svc.shared });
+        g.services.splice(idx + 1, 0, { id: uid(), name: svc.name, url: svc.url, shared: !!svc.shared, muted: !!svc.muted });
         persist(); render();
+      } },
+    { label: svc.muted ? 'Unmute notifications' : 'Mute notifications', fn: () => {
+        svc.muted = !svc.muted; persist(); render();
       } }
   ];
   if (idx > 0) items.push({ label: 'Move up', fn: () => swap(idx, idx - 1) });
   if (idx < g.services.length - 1) items.push({ label: 'Move down', fn: () => swap(idx, idx + 1) });
+
+  const others = config.groups.filter((gr) => gr.id !== g.id);
+  if (others.length) {
+    items.push({ sep: true });
+    items.push({ head: 'Move to group' });
+    others.forEach((tg) => items.push({ indent: true, label: tg.name, fn: () => moveServiceToGroup(id, tg.id) }));
+  }
+
+  items.push({ sep: true });
   items.push({ label: 'Remove', danger: true, fn: () => removeService(id) });
   openMenu(x, y, items);
 }
@@ -297,6 +326,19 @@ function showServiceMenu(x, y, id) {
 function swap(i, j) {
   const g = activeGroup();
   [g.services[i], g.services[j]] = [g.services[j], g.services[i]];
+  persist();
+  render();
+}
+
+function moveServiceToGroup(id, targetGroupId) {
+  const from = activeGroup();
+  const idx = from.services.findIndex((s) => s.id === id);
+  const target = config.groups.find((gr) => gr.id === targetGroupId);
+  if (idx < 0 || !target) return;
+  const [svc] = from.services.splice(idx, 1);
+  target.services.push(svc);
+  if (from.activeServiceId === id) from.activeServiceId = null;
+  dropView(id); // rebuild under the target group's partition when that group is opened
   persist();
   render();
 }
@@ -320,13 +362,20 @@ function showGroupMenu() {
     items.push({ label: g.name, checked: g.id === config.activeGroupId, fn: () => setActiveGroup(g.id) });
   });
   items.push({ sep: true });
-  items.push({ label: '＋ New group', fn: () => openGroupDialog(null) });
-  items.push({ label: '⧉ Duplicate this group (same setup, separate logins)', fn: duplicateActiveGroup });
-  items.push({ label: '✎ Edit this group (name / image)', fn: () => openGroupDialog(config.activeGroupId) });
-  items.push({ label: 'Delete this group', danger: true, fn: deleteActiveGroup });
+  items.push({ label: 'New group', fn: () => openGroupDialog(null) });
+  items.push({ label: 'Duplicate group (same setup, separate logins)', fn: duplicateActiveGroup });
+  items.push({ label: 'Edit group (name & image)', fn: () => openGroupDialog(config.activeGroupId) });
+  items.push({ label: 'Delete group', danger: true, fn: deleteActiveGroup });
   openMenu(r.right + 6, r.top, items);
 }
 groupBtn.addEventListener('click', (e) => { e.stopPropagation(); showGroupMenu(); });
+
+dndBtn.addEventListener('click', () => {
+  config.dnd = !config.dnd;
+  persist();
+  paintDnd();
+  syncNotifyBlocks();
+});
 
 function duplicateActiveGroup() {
   const g = activeGroup();
@@ -454,11 +503,12 @@ document.getElementById('emptyAdd').addEventListener('click', () => openDialog(n
   if (!config || !Array.isArray(config.groups)) {
     config = { version: 2, activeGroupId: null, groups: [] };
   }
+  config.dnd = !!config.dnd;
   config.groups.forEach((g) => {
     g.id = g.id || uid('g');
     g.name = g.name || 'Group';
     g.icon = g.icon || null;
-    g.services = (g.services || []).map((s) => ({ id: s.id || uid(), name: s.name, url: s.url, shared: !!s.shared }));
+    g.services = (g.services || []).map((s) => ({ id: s.id || uid(), name: s.name, url: s.url, shared: !!s.shared, muted: !!s.muted }));
     if (g.activeServiceId && !g.services.some((s) => s.id === g.activeServiceId)) g.activeServiceId = null;
   });
   render();

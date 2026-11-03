@@ -13,16 +13,20 @@
     <nav id="sidebar">
       <button id="groupBtn" class="group-btn" title="Groups">?</button>
       <div class="rail-divider"></div>
-      <div id="services" class="services"></div>
-      <button id="addBtn" class="rail-btn add" title="Add a service">+</button>
+      <div class="rail-scroll">
+        <div id="services" class="services"></div>
+        <button id="addBtn" class="rail-btn add" title="Add a service">+</button>
+      </div>
+      <button id="dndBtn" class="rail-btn dnd" title="Do Not Disturb — silence all alerts">☾</button>
     </nav>
 
     <!-- Right side: stacked webviews, one shown at a time -->
     <main id="stage">
       <div id="webviews" class="webviews"></div>
       <div id="empty" class="empty hidden">
-        <h1>GiGi</h1>
-        <p>Add your first service to get started.</p>
+        <img class="empty-logo" src="../../assets/logo.png" alt="GiGi" />
+        <h1>This group is empty</h1>
+        <p>Add a chat service or app to this group to start using it.</p>
         <button id="emptyAdd" class="primary">Add a service</button>
       </div>
     </main>
