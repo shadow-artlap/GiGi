@@ -190,6 +190,9 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.whenReady().then(() => {
+    // Lets Windows attribute toast notifications to GiGi (correct name/icon,
+    // grouped under the app) instead of a generic host.
+    if (process.platform === 'win32') app.setAppUserModelId('com.gigi.app');
     wireWebContents();
     createWindow();
     createTray();
