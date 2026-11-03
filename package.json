@@ -32,7 +32,8 @@
       {
         "provider": "github",
         "owner": "shadow-artlap",
-        "repo": "GiGi"
+        "repo": "GiGi",
+        "releaseType": "release"
       }
     ],
     "win": {
