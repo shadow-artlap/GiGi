@@ -170,6 +170,25 @@ function wireWebContents() {
 ipcMain.handle('config:get', () => loadConfig());
 ipcMain.handle('config:save', (_e, config) => saveConfig(config));
 
+// Let the user pick an image for a group; return it as a small 64x64 PNG data URL
+// so it stores inline in the config (no extra files to manage).
+ipcMain.handle('group:pick-icon', async () => {
+  const res = await dialog.showOpenDialog(win, {
+    title: 'Choose a group image',
+    properties: ['openFile'],
+    filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico'] }]
+  });
+  if (res.canceled || !res.filePaths[0]) return null;
+  try {
+    const img = nativeImage.createFromPath(res.filePaths[0]);
+    if (img.isEmpty()) return null;
+    return img.resize({ width: 64, height: 64, quality: 'good' }).toDataURL();
+  } catch (err) {
+    console.error('Failed to read group image:', err);
+    return null;
+  }
+});
+
 ipcMain.on('badge:set', (_e, countRaw) => {
   const count = Number(countRaw) || 0;
   try { app.setBadgeCount(count); } catch (_) { /* unsupported platform */ }

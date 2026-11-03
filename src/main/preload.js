@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('hub', {
 
   getConfig: () => ipcRenderer.invoke('config:get'),
   saveConfig: (config) => ipcRenderer.invoke('config:save', config),
+  pickGroupIcon: () => ipcRenderer.invoke('group:pick-icon'),
 
   setBadge: (count) => ipcRenderer.send('badge:set', count),
   flash: () => ipcRenderer.send('window:flash')

@@ -1,7 +1,8 @@
 'use strict';
 
 // GiGi renderer: groups (workspaces) in the sidebar, each with its own set of
-// service tabs (<webview>). Config is loaded from / saved to the main process.
+// service tabs (<webview>) and an optional custom icon. The active group and the
+// active tab per group are stored in the config, so they persist across restarts.
 
 const servicesEl = document.getElementById('services');
 const webviewsEl = document.getElementById('webviews');
@@ -18,14 +19,18 @@ const groupDialog = document.getElementById('groupDialog');
 const groupForm = document.getElementById('groupForm');
 const groupNameInput = document.getElementById('groupName');
 const groupDlgTitle = document.getElementById('groupDlgTitle');
+const groupIconPreview = document.getElementById('groupIconPreview');
+const pickIconBtn = document.getElementById('pickIconBtn');
+const removeIconBtn = document.getElementById('removeIconBtn');
 
-// config = { version, activeGroupId, groups: [{ id, name, services:[{id,name,url,shared}] }] }
+// config = { version, activeGroupId,
+//            groups: [{ id, name, icon?, activeServiceId?, services:[{id,name,url,shared}] }] }
 let config = { version: 2, activeGroupId: null, groups: [] };
 const unread = new Map();          // serviceId -> count
 const views = new Map();           // serviceId -> { webview, button, partition, iconUrl }
-const activeByGroup = new Map();   // groupId -> serviceId
 let editingId = null;              // service id being edited, or null
 let groupEditId = null;            // group id being renamed, or null (null = create)
+let groupIconDraft;               // dialog's pending icon: undefined=unchanged, null=remove, string=new
 
 // ---- Helpers ----------------------------------------------------------------
 const uid = (p = 's') => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -46,10 +51,8 @@ function activeGroup() {
   return config.groups.find((g) => g.id === config.activeGroupId) || config.groups[0];
 }
 
-// The partition decides which cookie/storage jar a tab uses.
-// - Private: persist:<serviceId>  → unique per tab (isolated account).
-// - Shared:  persist:shared:<groupId>:<origin>  → linked only within the same group,
-//   so the same site in another group keeps a separate login.
+// Private: persist:<serviceId>. Shared: persist:shared:<groupId>:<origin> (linked
+// only within the group). Each group keeps separate logins for the same site.
 function partitionFor(svc, group) {
   if (svc.shared) {
     let origin;
@@ -68,6 +71,21 @@ async function persist() {
   await window.hub.saveConfig(config);
 }
 
+// Paint a round icon element (letter or image) for a group.
+function paintGroupIcon(el, group) {
+  el.innerHTML = '';
+  if (group && group.icon) {
+    const img = document.createElement('img');
+    img.src = group.icon;
+    el.appendChild(img);
+    el.style.background = '#0f1115';
+  } else {
+    const name = (group && group.name) || '';
+    el.textContent = (name.trim()[0] || '?').toUpperCase();
+    el.style.background = avatarColor('grp-' + name);
+  }
+}
+
 // ---- View (webview) creation ------------------------------------------------
 function createView(svc, partition) {
   const webview = document.createElement('webview');
@@ -84,15 +102,14 @@ function createView(svc, partition) {
     if (url) setButtonIcon(svc.id, url);
   });
   webview.addEventListener('ipc-message', (e) => {
+    const activeId = activeGroup().activeServiceId;
     if (e.channel === 'unread') {
       const prev = unread.get(svc.id) || 0;
       const now = e.args[0] || 0;
       unread.set(svc.id, now);
-      const activeId = activeByGroup.get(config.activeGroupId);
       if (now > prev && (svc.id !== activeId || !document.hasFocus())) window.hub.flash();
       refreshBadges();
     } else if (e.channel === 'notify') {
-      const activeId = activeByGroup.get(config.activeGroupId);
       if (svc.id !== activeId || !document.hasFocus()) window.hub.flash();
     }
   });
@@ -114,7 +131,6 @@ function createView(svc, partition) {
 
 // ---- Rendering --------------------------------------------------------------
 function render() {
-  // Make sure there is always a valid active group.
   if (!config.groups.length) {
     config.groups.push({ id: uid('g'), name: 'Default', services: [] });
   }
@@ -123,16 +139,16 @@ function render() {
   }
   const g = activeGroup();
 
-  // Group button (initial letter).
-  groupBtn.textContent = (g.name.trim()[0] || '?').toUpperCase();
+  // Group button (custom image or letter).
+  paintGroupIcon(groupBtn, g);
   groupBtn.title = `Group: ${g.name}`;
-  groupBtn.style.background = avatarColor('grp-' + g.name);
 
-  // Resolve the active service within this group.
+  // Resolve + remember the active service for this group (persisted on config).
   const ids = g.services.map((s) => s.id);
-  let activeId = activeByGroup.get(g.id);
-  if (!activeId || !ids.includes(activeId)) activeId = g.services[0] && g.services[0].id;
-  activeByGroup.set(g.id, activeId || null);
+  if (!g.activeServiceId || !ids.includes(g.activeServiceId)) {
+    g.activeServiceId = (g.services[0] && g.services[0].id) || null;
+  }
+  const activeId = g.activeServiceId;
 
   // Sidebar buttons for this group's services.
   servicesEl.innerHTML = '';
@@ -166,7 +182,7 @@ function paintButton(svc, button, activeId) {
   if (hasIcon) {
     const img = document.createElement('img');
     img.src = entry.iconUrl;
-    img.onerror = () => { entry.iconUrl = null; paintButton(svc, button, activeByGroup.get(config.activeGroupId)); };
+    img.onerror = () => { entry.iconUrl = null; paintButton(svc, button, activeGroup().activeServiceId); };
     button.appendChild(img);
   } else {
     button.textContent = (svc.name.trim()[0] || '?').toUpperCase();
@@ -191,11 +207,10 @@ function setButtonIcon(id, url) {
   const entry = views.get(id);
   if (!entry) return;
   entry.iconUrl = url;
-  // Find the service in whichever group holds it.
   let svc = null;
   for (const gr of config.groups) { const f = gr.services.find((s) => s.id === id); if (f) { svc = f; break; } }
   if (svc) {
-    paintButton(svc, entry.button, activeByGroup.get(config.activeGroupId));
+    paintButton(svc, entry.button, activeGroup().activeServiceId);
     refreshBadges();
   }
 }
@@ -217,17 +232,18 @@ function refreshBadges() {
 }
 
 function activate(id) {
-  activeByGroup.set(config.activeGroupId, id);
+  activeGroup().activeServiceId = id;
+  persist();           // remember the open tab across restarts
   render();
 }
 
 function setActiveGroup(gid) {
   config.activeGroupId = gid;
-  persist();
+  persist();           // remember the chosen group across restarts
   render();
 }
 
-// ---- Popup menu (shared by service + group menus) ---------------------------
+// ---- Popup menu (service + group) -------------------------------------------
 let menu = document.getElementById('menu');
 if (!menu) {
   menu = document.createElement('div');
@@ -291,7 +307,7 @@ function removeService(id) {
   if (!svc) return;
   if (!confirm(`Remove "${svc.name}" from "${g.name}"? Its local session data stays on disk until cleared.`)) return;
   g.services = g.services.filter((s) => s.id !== id);
-  if (activeByGroup.get(g.id) === id) activeByGroup.set(g.id, null);
+  if (g.activeServiceId === id) g.activeServiceId = null;
   persist();
   render();
 }
@@ -301,16 +317,12 @@ function showGroupMenu() {
   const r = groupBtn.getBoundingClientRect();
   const items = [];
   config.groups.forEach((g) => {
-    items.push({
-      label: g.name,
-      checked: g.id === config.activeGroupId,
-      fn: () => setActiveGroup(g.id)
-    });
+    items.push({ label: g.name, checked: g.id === config.activeGroupId, fn: () => setActiveGroup(g.id) });
   });
   items.push({ sep: true });
   items.push({ label: '＋ New group', fn: () => openGroupDialog(null) });
   items.push({ label: '⧉ Duplicate this group (same setup, separate logins)', fn: duplicateActiveGroup });
-  items.push({ label: '✎ Rename this group', fn: () => openGroupDialog(config.activeGroupId) });
+  items.push({ label: '✎ Edit this group (name / image)', fn: () => openGroupDialog(config.activeGroupId) });
   items.push({ label: 'Delete this group', danger: true, fn: deleteActiveGroup });
   openMenu(r.right + 6, r.top, items);
 }
@@ -318,10 +330,10 @@ groupBtn.addEventListener('click', (e) => { e.stopPropagation(); showGroupMenu()
 
 function duplicateActiveGroup() {
   const g = activeGroup();
-  // Same setup (name/url/mode) but brand-new service ids → logins stay separate.
   const copy = {
     id: uid('g'),
     name: g.name + ' copy',
+    icon: g.icon || null,
     services: g.services.map((s) => ({ id: uid(), name: s.name, url: s.url, shared: !!s.shared }))
   };
   config.groups.push(copy);
@@ -340,26 +352,47 @@ function deleteActiveGroup() {
   render();
 }
 
-// ---- Group create/rename dialog ---------------------------------------------
+// ---- Group create/edit dialog (name + image) --------------------------------
 function openGroupDialog(id) {
   groupEditId = id || null;
   const g = id ? config.groups.find((x) => x.id === id) : null;
-  groupDlgTitle.textContent = g ? 'Rename group' : 'New group';
+  groupDlgTitle.textContent = g ? 'Edit group' : 'New group';
   groupNameInput.value = g ? g.name : '';
+  groupIconDraft = g ? (g.icon || null) : null;   // start from existing
+  paintGroupIcon(groupIconPreview, { name: groupNameInput.value, icon: groupIconDraft });
   groupDialog.showModal();
   groupNameInput.focus();
 }
+
+groupNameInput.addEventListener('input', () => {
+  // keep the letter preview in sync while there is no image
+  if (!groupIconDraft) paintGroupIcon(groupIconPreview, { name: groupNameInput.value, icon: null });
+});
+
+pickIconBtn.addEventListener('click', async () => {
+  const data = await window.hub.pickGroupIcon();
+  if (data) {
+    groupIconDraft = data;
+    paintGroupIcon(groupIconPreview, { name: groupNameInput.value, icon: data });
+  }
+});
+
+removeIconBtn.addEventListener('click', () => {
+  groupIconDraft = null;
+  paintGroupIcon(groupIconPreview, { name: groupNameInput.value, icon: null });
+});
 
 groupForm.addEventListener('submit', (e) => {
   if (e.submitter && e.submitter.value === 'cancel') { groupDialog.close(); return; }
   e.preventDefault();
   const name = groupNameInput.value.trim();
   if (!name) return;
+  const icon = groupIconDraft || null;
   if (groupEditId) {
     const g = config.groups.find((x) => x.id === groupEditId);
-    if (g) g.name = name;
+    if (g) { g.name = name; g.icon = icon; }
   } else {
-    const ng = { id: uid('g'), name, services: [] };
+    const ng = { id: uid('g'), name, icon, services: [] };
     config.groups.push(ng);
     config.activeGroupId = ng.id;
   }
@@ -418,14 +451,15 @@ document.getElementById('emptyAdd').addEventListener('click', () => openDialog(n
 // ---- Boot -------------------------------------------------------------------
 (async function init() {
   config = await window.hub.getConfig();
-  // Defensive normalization.
   if (!config || !Array.isArray(config.groups)) {
     config = { version: 2, activeGroupId: null, groups: [] };
   }
   config.groups.forEach((g) => {
     g.id = g.id || uid('g');
     g.name = g.name || 'Group';
+    g.icon = g.icon || null;
     g.services = (g.services || []).map((s) => ({ id: s.id || uid(), name: s.name, url: s.url, shared: !!s.shared }));
+    if (g.activeServiceId && !g.services.some((s) => s.id === g.activeServiceId)) g.activeServiceId = null;
   });
   render();
   await persist();
