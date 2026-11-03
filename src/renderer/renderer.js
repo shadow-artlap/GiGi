@@ -137,7 +137,10 @@ function render() {
     activeId = null;
   } else {
     emptyEl.classList.add('hidden');
-    if (!activeId || !views.has(activeId)) activate(services[0].id);
+    // Re-apply visibility every render so a tab rebuilt this pass (mode/URL change
+    // on the active tab) is shown again instead of staying hidden.
+    if (activeId && views.has(activeId)) activate(activeId);
+    else activate(services[0].id);
   }
 
   refreshBadges();
