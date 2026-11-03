@@ -11,6 +11,8 @@
   <div id="app">
     <!-- Left rail: one button per service -->
     <nav id="sidebar">
+      <button id="groupBtn" class="group-btn" title="Groups">?</button>
+      <div class="rail-divider"></div>
       <div id="services" class="services"></div>
       <button id="addBtn" class="rail-btn add" title="Add a service">+</button>
     </nav>
@@ -51,6 +53,21 @@
       <div class="row">
         <button value="cancel" class="ghost" type="submit" formnovalidate>Cancel</button>
         <button value="ok" class="primary" id="svcSave" type="submit">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Create / rename a group -->
+  <dialog id="groupDialog">
+    <form method="dialog" id="groupForm">
+      <h2 id="groupDlgTitle">New group</h2>
+      <label>Group name
+        <input id="groupName" type="text" placeholder="e.g. Work, Personal" required />
+      </label>
+      <p class="hint">A group is its own set of tabs (same links &amp; names = same setup). Logins stay separate from other groups.</p>
+      <div class="row">
+        <button value="cancel" class="ghost" type="submit" formnovalidate>Cancel</button>
+        <button value="ok" class="primary" type="submit">Save</button>
       </div>
     </form>
   </dialog>

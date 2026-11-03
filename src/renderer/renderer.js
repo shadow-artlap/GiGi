@@ -1,25 +1,34 @@
 'use strict';
 
-// GiGi renderer: owns the sidebar and the stack of <webview> elements.
-// Config is loaded from / saved to the main process (local JSON file).
+// GiGi renderer: groups (workspaces) in the sidebar, each with its own set of
+// service tabs (<webview>). Config is loaded from / saved to the main process.
 
 const servicesEl = document.getElementById('services');
 const webviewsEl = document.getElementById('webviews');
 const emptyEl = document.getElementById('empty');
+const groupBtn = document.getElementById('groupBtn');
+
 const dialog = document.getElementById('dialog');
 const form = document.getElementById('svcForm');
 const nameInput = document.getElementById('svcName');
 const urlInput = document.getElementById('svcUrl');
 const dlgTitle = document.getElementById('dlgTitle');
 
-let services = [];          // [{ id, name, url }]
-let activeId = null;
-const unread = new Map();    // id -> count
-const views = new Map();     // id -> { webview, button }
-let editingId = null;        // id being edited, or null when adding
+const groupDialog = document.getElementById('groupDialog');
+const groupForm = document.getElementById('groupForm');
+const groupNameInput = document.getElementById('groupName');
+const groupDlgTitle = document.getElementById('groupDlgTitle');
+
+// config = { version, activeGroupId, groups: [{ id, name, services:[{id,name,url,shared}] }] }
+let config = { version: 2, activeGroupId: null, groups: [] };
+const unread = new Map();          // serviceId -> count
+const views = new Map();           // serviceId -> { webview, button, partition, iconUrl }
+const activeByGroup = new Map();   // groupId -> serviceId
+let editingId = null;              // service id being edited, or null
+let groupEditId = null;            // group id being renamed, or null (null = create)
 
 // ---- Helpers ----------------------------------------------------------------
-const uid = () => 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+const uid = (p = 's') => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 
 function avatarColor(name) {
   let h = 0;
@@ -33,15 +42,19 @@ function normalizeUrl(raw) {
   return u;
 }
 
+function activeGroup() {
+  return config.groups.find((g) => g.id === config.activeGroupId) || config.groups[0];
+}
+
 // The partition decides which cookie/storage jar a tab uses.
-// - Private: a unique jar per tab (persist:<id>) → fully isolated account.
-// - Shared:  one jar per site origin (persist:shared:<origin>) → every "Shared"
-//   tab of the same site is the same login/data.
-function partitionFor(svc) {
+// - Private: persist:<serviceId>  → unique per tab (isolated account).
+// - Shared:  persist:shared:<groupId>:<origin>  → linked only within the same group,
+//   so the same site in another group keeps a separate login.
+function partitionFor(svc, group) {
   if (svc.shared) {
     let origin;
     try { origin = new URL(normalizeUrl(svc.url)).origin; } catch (_) { origin = svc.url; }
-    return 'persist:shared:' + origin;
+    return 'persist:shared:' + group.id + ':' + origin;
   }
   return 'persist:' + svc.id;
 }
@@ -51,109 +64,109 @@ function dropView(id) {
   if (entry) { entry.webview.remove(); entry.button.remove(); views.delete(id); }
 }
 
-// ---- Persistence ------------------------------------------------------------
 async function persist() {
-  await window.hub.saveServices(
-    services.map(({ id, name, url, shared }) => ({ id, name, url, shared: !!shared }))
-  );
+  await window.hub.saveConfig(config);
+}
+
+// ---- View (webview) creation ------------------------------------------------
+function createView(svc, partition) {
+  const webview = document.createElement('webview');
+  webview.className = 'hidden';
+  webview.setAttribute('src', svc.url);
+  webview.setAttribute('partition', partition);
+  webview.setAttribute('preload', window.hub.webviewPreload);
+  webview.setAttribute('allowpopups', 'true');
+  webview.setAttribute('useragent',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+
+  webview.addEventListener('page-favicon-updated', (e) => {
+    const url = e.favicons && e.favicons[0];
+    if (url) setButtonIcon(svc.id, url);
+  });
+  webview.addEventListener('ipc-message', (e) => {
+    if (e.channel === 'unread') {
+      const prev = unread.get(svc.id) || 0;
+      const now = e.args[0] || 0;
+      unread.set(svc.id, now);
+      const activeId = activeByGroup.get(config.activeGroupId);
+      if (now > prev && (svc.id !== activeId || !document.hasFocus())) window.hub.flash();
+      refreshBadges();
+    } else if (e.channel === 'notify') {
+      const activeId = activeByGroup.get(config.activeGroupId);
+      if (svc.id !== activeId || !document.hasFocus()) window.hub.flash();
+    }
+  });
+
+  const button = document.createElement('button');
+  button.className = 'rail-btn';
+  button.title = svc.name;
+  button.addEventListener('click', () => activate(svc.id));
+  button.addEventListener('contextmenu', (ev) => {
+    ev.preventDefault();
+    showServiceMenu(ev.clientX, ev.clientY, svc.id);
+  });
+
+  const entry = { webview, button, partition };
+  views.set(svc.id, entry);
+  webviewsEl.appendChild(webview);
+  return entry;
 }
 
 // ---- Rendering --------------------------------------------------------------
 function render() {
+  // Make sure there is always a valid active group.
+  if (!config.groups.length) {
+    config.groups.push({ id: uid('g'), name: 'Default', services: [] });
+  }
+  if (!config.groups.some((g) => g.id === config.activeGroupId)) {
+    config.activeGroupId = config.groups[0].id;
+  }
+  const g = activeGroup();
+
+  // Group button (initial letter).
+  groupBtn.textContent = (g.name.trim()[0] || '?').toUpperCase();
+  groupBtn.title = `Group: ${g.name}`;
+  groupBtn.style.background = avatarColor('grp-' + g.name);
+
+  // Resolve the active service within this group.
+  const ids = g.services.map((s) => s.id);
+  let activeId = activeByGroup.get(g.id);
+  if (!activeId || !ids.includes(activeId)) activeId = g.services[0] && g.services[0].id;
+  activeByGroup.set(g.id, activeId || null);
+
+  // Sidebar buttons for this group's services.
   servicesEl.innerHTML = '';
-  const seen = new Set();
-
-  services.forEach((svc) => {
-    seen.add(svc.id);
+  g.services.forEach((svc) => {
     let entry = views.get(svc.id);
-
-    // A webview's partition is fixed once created; if the mode/origin changed,
-    // drop the old webview so it is rebuilt with the new jar.
-    if (entry && entry.partition !== partitionFor(svc)) { dropView(svc.id); entry = null; }
-
-    // Create the webview once, lazily reused afterwards.
-    if (!entry) {
-      const partition = partitionFor(svc);
-      const webview = document.createElement('webview');
-      webview.className = 'hidden';
-      webview.setAttribute('src', svc.url);
-      webview.setAttribute('partition', partition);
-      webview.setAttribute('preload', window.hub.webviewPreload);
-      webview.setAttribute('allowpopups', 'true');
-      webview.setAttribute('useragent',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-
-      webview.addEventListener('page-favicon-updated', (e) => {
-        const url = e.favicons && e.favicons[0];
-        if (url) setButtonIcon(svc.id, url);
-      });
-      webview.addEventListener('ipc-message', (e) => {
-        if (e.channel === 'unread') {
-          const prev = unread.get(svc.id) || 0;
-          const now = e.args[0] || 0;
-          unread.set(svc.id, now);
-          // Flash the taskbar when a background service gains unread messages.
-          // This is reliable even when the page's Notification API cannot be
-          // hooked (webviews run with contextIsolation on).
-          if (now > prev && (svc.id !== activeId || !document.hasFocus())) window.hub.flash();
-          refreshBadges();
-        } else if (e.channel === 'notify') {
-          if (svc.id !== activeId || !document.hasFocus()) window.hub.flash();
-        }
-      });
-
-      const button = document.createElement('button');
-      button.className = 'rail-btn';
-      button.title = svc.name;
-      button.addEventListener('click', () => activate(svc.id));
-      button.addEventListener('contextmenu', (ev) => {
-        ev.preventDefault();
-        showContextMenu(ev.clientX, ev.clientY, svc.id);
-      });
-
-      entry = { webview, button, partition };
-      views.set(svc.id, entry);
-      webviewsEl.appendChild(webview);
-    }
-
+    const partition = partitionFor(svc, g);
+    if (entry && entry.partition !== partition) { dropView(svc.id); entry = null; }
+    if (!entry) entry = createView(svc, partition);
     entry.button.title = svc.name;
-    paintButton(svc, entry.button);
+    paintButton(svc, entry.button, activeId);
     servicesEl.appendChild(entry.button);
   });
 
-  // Drop any webviews for services that were removed.
+  // Visibility + cleanup of webviews that no longer belong to any group.
+  const allIds = new Set(config.groups.flatMap((gr) => gr.services.map((s) => s.id)));
+  const activeSet = new Set(ids);
   for (const id of [...views.keys()]) {
-    if (!seen.has(id)) {
-      const { webview, button } = views.get(id);
-      webview.remove();
-      button.remove();
-      views.delete(id);
-      unread.delete(id);
-    }
+    if (!allIds.has(id)) { dropView(id); unread.delete(id); continue; }
+    const entry = views.get(id);
+    entry.webview.classList.toggle('hidden', !(activeSet.has(id) && id === activeId));
   }
 
-  if (services.length === 0) {
-    emptyEl.classList.remove('hidden');
-    activeId = null;
-  } else {
-    emptyEl.classList.add('hidden');
-    // Re-apply visibility every render so a tab rebuilt this pass (mode/URL change
-    // on the active tab) is shown again instead of staying hidden.
-    if (activeId && views.has(activeId)) activate(activeId);
-    else activate(services[0].id);
-  }
-
+  emptyEl.classList.toggle('hidden', g.services.length > 0);
   refreshBadges();
 }
 
-function paintButton(svc, button) {
+function paintButton(svc, button, activeId) {
   const entry = views.get(svc.id);
   const hasIcon = entry && entry.iconUrl;
   button.innerHTML = '';
   if (hasIcon) {
     const img = document.createElement('img');
     img.src = entry.iconUrl;
-    img.onerror = () => { entry.iconUrl = null; paintButton(svc, button); };
+    img.onerror = () => { entry.iconUrl = null; paintButton(svc, button, activeByGroup.get(config.activeGroupId)); };
     button.appendChild(img);
   } else {
     button.textContent = (svc.name.trim()[0] || '?').toUpperCase();
@@ -166,7 +179,7 @@ function paintButton(svc, button) {
   if (svc.shared) {
     const mark = document.createElement('span');
     mark.className = 'link-mark';
-    mark.title = 'Shared login';
+    mark.title = 'Shared login (within this group)';
     mark.textContent = '🔗';
     button.appendChild(mark);
   }
@@ -178,16 +191,19 @@ function setButtonIcon(id, url) {
   const entry = views.get(id);
   if (!entry) return;
   entry.iconUrl = url;
-  const svc = services.find((s) => s.id === id);
+  // Find the service in whichever group holds it.
+  let svc = null;
+  for (const gr of config.groups) { const f = gr.services.find((s) => s.id === id); if (f) { svc = f; break; } }
   if (svc) {
-    paintButton(svc, entry.button);
-    refreshBadges(); // repaint rebuilt the badge; re-apply the current count
+    paintButton(svc, entry.button, activeByGroup.get(config.activeGroupId));
+    refreshBadges();
   }
 }
 
 function refreshBadges() {
+  const g = activeGroup();
   let total = 0;
-  services.forEach((svc) => {
+  g.services.forEach((svc) => {
     const n = unread.get(svc.id) || 0;
     total += n;
     const entry = views.get(svc.id);
@@ -201,83 +217,163 @@ function refreshBadges() {
 }
 
 function activate(id) {
-  activeId = id;
-  views.forEach((entry, key) => {
-    entry.webview.classList.toggle('hidden', key !== id);
-    entry.button.classList.toggle('active', key === id);
-  });
+  activeByGroup.set(config.activeGroupId, id);
+  render();
 }
 
-// ---- Context menu (right-click a service) -----------------------------------
-let ctx = document.getElementById('ctx');
-if (!ctx) {
-  ctx = document.createElement('div');
-  ctx.id = 'ctx';
-  ctx.className = 'hidden';
-  document.body.appendChild(ctx);
+function setActiveGroup(gid) {
+  config.activeGroupId = gid;
+  persist();
+  render();
 }
-function hideContextMenu() { ctx.classList.add('hidden'); }
-window.addEventListener('click', hideContextMenu);
-window.addEventListener('blur', hideContextMenu);
 
-function showContextMenu(x, y, id) {
-  const idx = services.findIndex((s) => s.id === id);
-  ctx.innerHTML = '';
-  const add = (label, fn, danger) => {
+// ---- Popup menu (shared by service + group menus) ---------------------------
+let menu = document.getElementById('menu');
+if (!menu) {
+  menu = document.createElement('div');
+  menu.id = 'menu';
+  menu.className = 'hidden';
+  document.body.appendChild(menu);
+}
+function hideMenu() { menu.classList.add('hidden'); }
+window.addEventListener('click', hideMenu);
+window.addEventListener('blur', hideMenu);
+
+function openMenu(x, y, items) {
+  menu.innerHTML = '';
+  items.forEach((it) => {
+    if (it.sep) { const d = document.createElement('div'); d.className = 'menu-sep'; menu.appendChild(d); return; }
     const b = document.createElement('button');
-    b.textContent = label;
-    if (danger) b.className = 'danger';
-    b.addEventListener('click', (e) => { e.stopPropagation(); hideContextMenu(); fn(); });
-    ctx.appendChild(b);
-  };
-  const svc = services.find((s) => s.id === id);
-  add('Reload', () => { const v = views.get(id); if (v) v.webview.reload(); });
-  add('Edit…', () => openDialog(id));
-  add(svc && svc.shared ? 'Switch to Private' : 'Switch to Shared', () => {
-    const s = services.find((x) => x.id === id);
-    if (!s) return;
-    s.shared = !s.shared;
-    dropView(id);        // partition changes → rebuild the tab with the new jar
-    persist();
-    render();
+    b.textContent = it.label;
+    if (it.danger) b.className = 'danger';
+    if (it.checked) b.classList.add('checked');
+    b.addEventListener('click', (e) => { e.stopPropagation(); hideMenu(); it.fn(); });
+    menu.appendChild(b);
   });
-  add('Duplicate', () => {
-    const s = services.find((x) => x.id === id);
-    if (!s) return;
-    // A Shared duplicate joins the same login; a Private duplicate is a new account.
-    services.splice(idx + 1, 0, { id: uid(), name: s.name, url: s.url, shared: !!s.shared });
-    persist();
-    render();
-  });
-  if (idx > 0) add('Move up', () => { swap(idx, idx - 1); });
-  if (idx < services.length - 1) add('Move down', () => { swap(idx, idx + 1); });
-  add('Remove', () => removeService(id), true);
+  menu.style.left = Math.min(x, window.innerWidth - 270) + 'px';
+  menu.style.top = Math.min(y, window.innerHeight - 10) + 'px';
+  menu.classList.remove('hidden');
+}
 
-  ctx.style.left = Math.min(x, window.innerWidth - 170) + 'px';
-  ctx.style.top = Math.min(y, window.innerHeight - 10) + 'px';
-  ctx.classList.remove('hidden');
+// ---- Service context menu ---------------------------------------------------
+function showServiceMenu(x, y, id) {
+  const g = activeGroup();
+  const idx = g.services.findIndex((s) => s.id === id);
+  const svc = g.services[idx];
+  if (!svc) return;
+  const items = [
+    { label: 'Reload', fn: () => { const v = views.get(id); if (v) v.webview.reload(); } },
+    { label: 'Edit…', fn: () => openDialog(id) },
+    { label: svc.shared ? 'Switch to Private' : 'Switch to Shared', fn: () => {
+        svc.shared = !svc.shared; dropView(id); persist(); render();
+      } },
+    { label: 'Duplicate', fn: () => {
+        g.services.splice(idx + 1, 0, { id: uid(), name: svc.name, url: svc.url, shared: !!svc.shared });
+        persist(); render();
+      } }
+  ];
+  if (idx > 0) items.push({ label: 'Move up', fn: () => swap(idx, idx - 1) });
+  if (idx < g.services.length - 1) items.push({ label: 'Move down', fn: () => swap(idx, idx + 1) });
+  items.push({ label: 'Remove', danger: true, fn: () => removeService(id) });
+  openMenu(x, y, items);
 }
 
 function swap(i, j) {
-  [services[i], services[j]] = [services[j], services[i]];
+  const g = activeGroup();
+  [g.services[i], g.services[j]] = [g.services[j], g.services[i]];
   persist();
   render();
 }
 
 function removeService(id) {
-  const svc = services.find((s) => s.id === id);
+  const g = activeGroup();
+  const svc = g.services.find((s) => s.id === id);
   if (!svc) return;
-  if (!confirm(`Remove "${svc.name}"? Its local session data stays on disk until you clear it.`)) return;
-  services = services.filter((s) => s.id !== id);
-  if (activeId === id) activeId = null;
+  if (!confirm(`Remove "${svc.name}" from "${g.name}"? Its local session data stays on disk until cleared.`)) return;
+  g.services = g.services.filter((s) => s.id !== id);
+  if (activeByGroup.get(g.id) === id) activeByGroup.set(g.id, null);
   persist();
   render();
 }
 
-// ---- Add / edit dialog ------------------------------------------------------
+// ---- Group menu -------------------------------------------------------------
+function showGroupMenu() {
+  const r = groupBtn.getBoundingClientRect();
+  const items = [];
+  config.groups.forEach((g) => {
+    items.push({
+      label: g.name,
+      checked: g.id === config.activeGroupId,
+      fn: () => setActiveGroup(g.id)
+    });
+  });
+  items.push({ sep: true });
+  items.push({ label: '＋ New group', fn: () => openGroupDialog(null) });
+  items.push({ label: '⧉ Duplicate this group (same setup, separate logins)', fn: duplicateActiveGroup });
+  items.push({ label: '✎ Rename this group', fn: () => openGroupDialog(config.activeGroupId) });
+  items.push({ label: 'Delete this group', danger: true, fn: deleteActiveGroup });
+  openMenu(r.right + 6, r.top, items);
+}
+groupBtn.addEventListener('click', (e) => { e.stopPropagation(); showGroupMenu(); });
+
+function duplicateActiveGroup() {
+  const g = activeGroup();
+  // Same setup (name/url/mode) but brand-new service ids → logins stay separate.
+  const copy = {
+    id: uid('g'),
+    name: g.name + ' copy',
+    services: g.services.map((s) => ({ id: uid(), name: s.name, url: s.url, shared: !!s.shared }))
+  };
+  config.groups.push(copy);
+  config.activeGroupId = copy.id;
+  persist();
+  render();
+}
+
+function deleteActiveGroup() {
+  const g = activeGroup();
+  if (!confirm(`Delete group "${g.name}" and its tab list? Saved logins for its tabs stay on disk until cleared.`)) return;
+  config.groups = config.groups.filter((x) => x.id !== g.id);
+  if (!config.groups.length) config.groups.push({ id: uid('g'), name: 'Default', services: [] });
+  config.activeGroupId = config.groups[0].id;
+  persist();
+  render();
+}
+
+// ---- Group create/rename dialog ---------------------------------------------
+function openGroupDialog(id) {
+  groupEditId = id || null;
+  const g = id ? config.groups.find((x) => x.id === id) : null;
+  groupDlgTitle.textContent = g ? 'Rename group' : 'New group';
+  groupNameInput.value = g ? g.name : '';
+  groupDialog.showModal();
+  groupNameInput.focus();
+}
+
+groupForm.addEventListener('submit', (e) => {
+  if (e.submitter && e.submitter.value === 'cancel') { groupDialog.close(); return; }
+  e.preventDefault();
+  const name = groupNameInput.value.trim();
+  if (!name) return;
+  if (groupEditId) {
+    const g = config.groups.find((x) => x.id === groupEditId);
+    if (g) g.name = name;
+  } else {
+    const ng = { id: uid('g'), name, services: [] };
+    config.groups.push(ng);
+    config.activeGroupId = ng.id;
+  }
+  groupEditId = null;
+  groupDialog.close();
+  persist();
+  render();
+});
+
+// ---- Add / edit service dialog ----------------------------------------------
 function openDialog(id) {
   editingId = id || null;
-  const svc = id ? services.find((s) => s.id === id) : null;
+  const g = activeGroup();
+  const svc = id ? g.services.find((s) => s.id === id) : null;
   dlgTitle.textContent = svc ? 'Edit service' : 'Add a service';
   nameInput.value = svc ? svc.name : '';
   urlInput.value = svc ? svc.url : '';
@@ -289,30 +385,26 @@ function openDialog(id) {
 }
 
 form.addEventListener('submit', (e) => {
-  // The "Cancel" button submits with value "cancel".
-  const submitter = e.submitter && e.submitter.value;
-  if (submitter === 'cancel') { dialog.close(); return; }
-
+  if (e.submitter && e.submitter.value === 'cancel') { dialog.close(); return; }
   e.preventDefault();
   const name = nameInput.value.trim();
   const url = normalizeUrl(urlInput.value);
   if (!name || !url) return;
   const shared = (form.querySelector('input[name="mode"]:checked') || {}).value === 'shared';
+  const g = activeGroup();
 
   if (editingId) {
-    const svc = services.find((s) => s.id === editingId);
-    const before = partitionFor(svc);
-    svc.name = name;
-    svc.url = url;
-    svc.shared = shared;
-    if (partitionFor(svc) !== before) {
-      dropView(svc.id);          // jar changed → rebuild on next render
+    const svc = g.services.find((s) => s.id === editingId);
+    const before = partitionFor(svc, g);
+    svc.name = name; svc.url = url; svc.shared = shared;
+    if (partitionFor(svc, g) !== before) {
+      dropView(svc.id);
     } else {
       const entry = views.get(svc.id);
       if (entry && entry.webview.getAttribute('src') !== url) entry.webview.setAttribute('src', url);
     }
   } else {
-    services.push({ id: uid(), name, url, shared });
+    g.services.push({ id: uid(), name, url, shared });
   }
   editingId = null;
   dialog.close();
@@ -325,9 +417,16 @@ document.getElementById('emptyAdd').addEventListener('click', () => openDialog(n
 
 // ---- Boot -------------------------------------------------------------------
 (async function init() {
-  services = await window.hub.getServices();
-  // Make sure every service has a stable id.
-  services = services.map((s) => ({ id: s.id || uid(), name: s.name, url: s.url, shared: !!s.shared }));
+  config = await window.hub.getConfig();
+  // Defensive normalization.
+  if (!config || !Array.isArray(config.groups)) {
+    config = { version: 2, activeGroupId: null, groups: [] };
+  }
+  config.groups.forEach((g) => {
+    g.id = g.id || uid('g');
+    g.name = g.name || 'Group';
+    g.services = (g.services || []).map((s) => ({ id: s.id || uid(), name: s.name, url: s.url, shared: !!s.shared }));
+  });
   render();
   await persist();
 })();

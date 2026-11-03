@@ -19,20 +19,40 @@ const DEFAULT_SERVICES = [
   { id: 'discord', name: 'Discord', url: 'https://discord.com/app' }
 ];
 
-function loadServices() {
-  try {
-    const list = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
-    if (Array.isArray(list)) return list;
-  } catch (_) { /* first run or unreadable → fall back to defaults */ }
-  return DEFAULT_SERVICES;
+const normSvc = (s) => ({ id: s.id, name: s.name, url: s.url, shared: !!s.shared });
+
+// Config schema v2: groups (workspaces). Each group has its own list of services
+// (the "setup": link + name + mode). Logins stay per-service and per-group, so the
+// same app in two groups keeps separate logins unless explicitly shared within a group.
+function loadConfig() {
+  let raw = null;
+  try { raw = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (_) { /* first run */ }
+
+  // Migrate an old flat services array into a single "Default" group.
+  if (Array.isArray(raw)) {
+    return {
+      version: 2,
+      activeGroupId: 'g_default',
+      groups: [{ id: 'g_default', name: 'Default', services: raw.map(normSvc) }]
+    };
+  }
+  if (raw && raw.version === 2 && Array.isArray(raw.groups) && raw.groups.length) {
+    return raw;
+  }
+  // Fresh install: one group seeded with the default services.
+  return {
+    version: 2,
+    activeGroupId: 'g_default',
+    groups: [{ id: 'g_default', name: 'Default', services: DEFAULT_SERVICES.map(normSvc) }]
+  };
 }
 
-function saveServices(list) {
+function saveConfig(config) {
   try {
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(list, null, 2));
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
     return true;
   } catch (err) {
-    console.error('Failed to save services:', err);
+    console.error('Failed to save config:', err);
     return false;
   }
 }
@@ -147,8 +167,8 @@ function wireWebContents() {
 }
 
 // ---- IPC (renderer <-> main) --------------------------------------------------
-ipcMain.handle('services:get', () => loadServices());
-ipcMain.handle('services:save', (_e, list) => saveServices(list));
+ipcMain.handle('config:get', () => loadConfig());
+ipcMain.handle('config:save', (_e, config) => saveConfig(config));
 
 ipcMain.on('badge:set', (_e, countRaw) => {
   const count = Number(countRaw) || 0;

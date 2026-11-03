@@ -14,8 +14,8 @@ contextBridge.exposeInMainWorld('hub', {
   webviewPreload: webviewPreloadUrl,
   platform: process.platform,
 
-  getServices: () => ipcRenderer.invoke('services:get'),
-  saveServices: (list) => ipcRenderer.invoke('services:save', list),
+  getConfig: () => ipcRenderer.invoke('config:get'),
+  saveConfig: (config) => ipcRenderer.invoke('config:save', config),
 
   setBadge: (count) => ipcRenderer.send('badge:set', count),
   flash: () => ipcRenderer.send('window:flash')
