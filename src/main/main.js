@@ -128,21 +128,20 @@ function initUpdater() {
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
 
-  autoUpdater.on('update-downloaded', (info) => {
-    dialog.showMessageBox(win, {
-      type: 'info',
-      buttons: ['Restart now', 'Later'],
-      defaultId: 0,
-      cancelId: 1,
-      title: 'Update ready',
-      message: `GiGi ${info.version} has been downloaded.`,
-      detail: 'Restart the app to install the new version.'
-    }).then(({ response }) => {
-      if (response === 0) { isQuitting = true; autoUpdater.quitAndInstall(); }
-    });
+  const send = (payload) => {
+    if (win && !win.isDestroyed()) win.webContents.send('update:status', payload);
+  };
+
+  autoUpdater.on('update-available', (info) => send({ state: 'available', version: info.version }));
+  autoUpdater.on('download-progress', (p) => send({ state: 'downloading', percent: Math.round(p.percent || 0) }));
+  autoUpdater.on('update-downloaded', (info) => send({ state: 'ready', version: info.version }));
+  autoUpdater.on('error', (err) => {
+    console.error('Updater error:', err);
+    send({ state: 'error' });
   });
 
-  autoUpdater.on('error', (err) => console.error('Updater error:', err));
+  // The in-app banner's "Restart" button triggers the install.
+  ipcMain.on('update:install', () => { isQuitting = true; try { autoUpdater.quitAndInstall(); } catch (_) {} });
 
   const check = () => autoUpdater.checkForUpdates().catch(() => {});
   check();                                     // on launch

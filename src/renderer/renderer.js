@@ -377,6 +377,32 @@ dndBtn.addEventListener('click', () => {
   syncNotifyBlocks();
 });
 
+// ---- In-app update notification ---------------------------------------------
+const updateToast = document.getElementById('updateToast');
+const updateMsg = document.getElementById('updateMsg');
+const updateAction = document.getElementById('updateAction');
+const updateClose = document.getElementById('updateClose');
+const updateDot = updateToast.querySelector('.toast-dot');
+
+function showUpdateToast(msg, { action = false, spin = false } = {}) {
+  updateMsg.textContent = msg;
+  updateAction.classList.toggle('hidden', !action);
+  updateDot.classList.toggle('spin', spin);
+  updateToast.classList.remove('hidden');
+}
+function hideUpdateToast() { updateToast.classList.add('hidden'); }
+
+updateClose.addEventListener('click', hideUpdateToast);
+updateAction.addEventListener('click', () => window.hub.installUpdate());
+
+window.hub.onUpdateStatus((p) => {
+  if (!p) return;
+  if (p.state === 'available') showUpdateToast(`Downloading GiGi ${p.version}…`, { spin: true });
+  else if (p.state === 'downloading') showUpdateToast(`Downloading update… ${p.percent}%`, { spin: true });
+  else if (p.state === 'ready') showUpdateToast(`GiGi ${p.version} is ready — restart to install.`, { action: true });
+  else if (p.state === 'error') hideUpdateToast();
+});
+
 function duplicateActiveGroup() {
   const g = activeGroup();
   const copy = {

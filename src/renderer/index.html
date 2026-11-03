@@ -61,6 +61,14 @@
     </form>
   </dialog>
 
+  <!-- Update notification -->
+  <div id="updateToast" class="toast hidden" role="status">
+    <span class="toast-dot"></span>
+    <span id="updateMsg" class="toast-msg"></span>
+    <button id="updateAction" class="toast-action hidden">Restart</button>
+    <button id="updateClose" class="toast-close" title="Dismiss" aria-label="Dismiss">✕</button>
+  </div>
+
   <!-- Create / rename a group -->
   <dialog id="groupDialog">
     <form method="dialog" id="groupForm">

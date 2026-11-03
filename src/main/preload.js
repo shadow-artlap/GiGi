@@ -18,6 +18,8 @@ contextBridge.exposeInMainWorld('hub', {
   saveConfig: (config) => ipcRenderer.invoke('config:save', config),
   pickGroupIcon: () => ipcRenderer.invoke('group:pick-icon'),
   setNotifyBlock: (partitions) => ipcRenderer.send('notify:block-set', partitions),
+  onUpdateStatus: (cb) => ipcRenderer.on('update:status', (_e, payload) => cb(payload)),
+  installUpdate: () => ipcRenderer.send('update:install'),
 
   setBadge: (count) => ipcRenderer.send('badge:set', count),
   flash: () => ipcRenderer.send('window:flash')
