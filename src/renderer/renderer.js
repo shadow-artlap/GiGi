@@ -39,7 +39,7 @@ const uid = (p = 's') => p + Date.now().toString(36) + Math.random().toString(36
 function avatarColor(name) {
   let h = 0;
   for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) % 360;
-  return `hsl(${h} 55% 45%)`;
+  return `hsl(${h} 42% 46%)`;
 }
 
 function normalizeUrl(raw) {
