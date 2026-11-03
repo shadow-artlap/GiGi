@@ -1,7 +1,7 @@
 {
   "name": "gigi",
   "productName": "GiGi",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "GiGi — a local all-in-one messenger. Combine many web services and accounts in one window, with notifications and unread counters. 100% local config, no cloud account, no telemetry.",
   "main": "src/main/main.js",
   "author": "GiGi",
