@@ -6,6 +6,8 @@ const fs = require('fs');
 
 // ---- Paths & storage (everything stays local) --------------------------------
 const CONFIG_FILE = path.join(app.getPath('userData'), 'services.json');
+const CONFIG_BAK = path.join(app.getPath('userData'), 'services.bak.json');
+const CONFIG_TMP = path.join(app.getPath('userData'), 'services.tmp.json');
 const ICON_FILE = path.join(__dirname, '..', '..', 'assets', 'icon.png');
 
 // A few popular services to start with. The user can add/remove/reorder freely;
@@ -21,13 +23,9 @@ const DEFAULT_SERVICES = [
 
 const normSvc = (s) => ({ id: s.id, name: s.name, url: s.url, shared: !!s.shared });
 
-// Config schema v2: groups (workspaces). Each group has its own list of services
-// (the "setup": link + name + mode). Logins stay per-service and per-group, so the
-// same app in two groups keeps separate logins unless explicitly shared within a group.
-function loadConfig() {
-  let raw = null;
-  try { raw = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch (_) { /* first run */ }
-
+// Parse raw JSON text into a valid config, or return null if it is not usable.
+function parseConfig(text) {
+  const raw = JSON.parse(text);
   // Migrate an old flat services array into a single "Default" group.
   if (Array.isArray(raw)) {
     return {
@@ -39,7 +37,44 @@ function loadConfig() {
   if (raw && raw.version === 2 && Array.isArray(raw.groups) && raw.groups.length) {
     return raw;
   }
-  // Fresh install: one group seeded with the default services.
+  return null;
+}
+
+function readConfigFile(file) {
+  try {
+    if (!fs.existsSync(file)) return null;
+    return parseConfig(fs.readFileSync(file, 'utf8'));
+  } catch (err) {
+    console.error('Config unreadable:', file, err.message);
+    return null;
+  }
+}
+
+// Config schema v2: groups (workspaces). Loading never destroys existing data:
+// a corrupt main file falls back to the backup, and a truly unreadable original
+// is preserved as services.corrupt-<ts>.json instead of being overwritten.
+function loadConfig() {
+  const mainExists = fs.existsSync(CONFIG_FILE);
+
+  const fromMain = readConfigFile(CONFIG_FILE);
+  if (fromMain) return fromMain;
+
+  // Main missing or corrupt → try the backup.
+  const fromBak = readConfigFile(CONFIG_BAK);
+  if (fromBak) {
+    console.warn('Recovered config from backup.');
+    return fromBak;
+  }
+
+  // Main exists but is unreadable and there is no good backup: keep the original
+  // for manual recovery and start empty (NOT the preset apps), so a corruption
+  // never masquerades as the user's chosen setup.
+  if (mainExists) {
+    try { fs.renameSync(CONFIG_FILE, CONFIG_FILE + '.corrupt-' + Date.now()); } catch (_) {}
+    return { version: 2, activeGroupId: 'g_default', groups: [{ id: 'g_default', name: 'Default', services: [] }] };
+  }
+
+  // Genuine first run: seed the default services.
   return {
     version: 2,
     activeGroupId: 'g_default',
@@ -47,9 +82,19 @@ function loadConfig() {
   };
 }
 
+// Atomic save: write a temp file, then rename over the real file (rename is atomic
+// on the same volume), so the config is never left half-written if the app is
+// killed mid-save. A second copy is kept as a backup for recovery.
 function saveConfig(config) {
+  if (!config || !Array.isArray(config.groups) || config.groups.length === 0) {
+    console.error('Refusing to save an empty config.');
+    return false; // never clobber real data with nothing
+  }
   try {
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+    const data = JSON.stringify(config, null, 2);
+    fs.writeFileSync(CONFIG_TMP, data);
+    fs.renameSync(CONFIG_TMP, CONFIG_FILE);
+    try { fs.writeFileSync(CONFIG_BAK, data); } catch (_) { /* backup is best-effort */ }
     return true;
   } catch (err) {
     console.error('Failed to save config:', err);
