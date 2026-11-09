@@ -158,12 +158,14 @@ async function applyRemoteTemplate(firstRun) {
   const empty = !currentConfig.groups.some((g) => (g.services || []).length);
 
   let changed = false;
-  if (firstRun || (untemplated && empty)) {
-    currentConfig = seedFromTemplate(tpl, ver);   // brand-new install → use the template
-    changed = true;
-  } else if (ver > (currentConfig.templateVersion || 0)) {
-    changed = mergeTemplate(currentConfig, tpl, ver);  // owner published an update
-  }
+  try {
+    if (firstRun || (untemplated && empty)) {
+      currentConfig = seedFromTemplate(tpl, ver);   // brand-new install → use the template
+      changed = true;
+    } else if (ver > (currentConfig.templateVersion || 0)) {
+      changed = mergeTemplate(currentConfig, tpl, ver);  // owner published an update
+    }
+  } catch (err) { console.error('Template merge failed:', err); }
 
   if (changed) {
     saveConfig(currentConfig);
