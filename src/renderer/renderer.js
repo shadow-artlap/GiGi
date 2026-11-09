@@ -141,6 +141,16 @@ function createView(svc, partition) {
     ev.preventDefault();
     showServiceMenu(ev.clientX, ev.clientY, svc.id);
   });
+  button.addEventListener('dragstart', (e) => {
+    if (!editingAllowed()) { e.preventDefault(); return; }
+    dragId = svc.id; e.dataTransfer.effectAllowed = 'move'; button.classList.add('dragging');
+  });
+  button.addEventListener('dragend', () => { dragId = null; button.classList.remove('dragging'); });
+  button.addEventListener('dragover', (e) => { if (dragId && editingAllowed()) e.preventDefault(); });
+  button.addEventListener('drop', (e) => {
+    e.preventDefault();
+    if (dragId && editingAllowed() && dragId !== svc.id) reorderService(dragId, svc.id);
+  });
 
   const entry = { webview, button, partition };
   views.set(svc.id, entry);
@@ -191,6 +201,8 @@ function render() {
   }
 
   emptyEl.classList.toggle('hidden', g.services.length > 0);
+  lockBtn.classList.toggle('hidden', !(config.pinHash && !config._unlocked));
+  addBtnEl.classList.toggle('hidden', !editingAllowed());
   refreshBadges();
   paintDnd();
   syncNotifyBlocks();
@@ -216,6 +228,7 @@ function paintButton(svc, button, activeId) {
   button.classList.toggle('shared', !!svc.shared);
   button.classList.toggle('muted', !!svc.muted);
   button.classList.toggle('active', svc.id === activeId);
+  button.draggable = editingAllowed();
 }
 
 function setButtonIcon(id, url) {
@@ -294,32 +307,40 @@ function showServiceMenu(x, y, id) {
   const idx = g.services.findIndex((s) => s.id === id);
   const svc = g.services[idx];
   if (!svc) return;
+  const canEdit = editingAllowed();
+
+  // Reload and Mute are local (always available); the rest change the shared setup.
   const items = [
     { label: 'Reload', fn: () => { const v = views.get(id); if (v) v.webview.reload(); } },
-    { label: 'Edit…', fn: () => openDialog(id) },
-    { label: svc.shared ? 'Switch to Private' : 'Switch to Shared', fn: () => {
-        svc.shared = !svc.shared; dropView(id); persist(); render();
-      } },
-    { label: 'Duplicate', fn: () => {
-        g.services.splice(idx + 1, 0, { id: uid(), name: svc.name, url: svc.url, shared: !!svc.shared, muted: !!svc.muted });
-        persist(); render();
-      } },
     { label: svc.muted ? 'Unmute notifications' : 'Mute notifications', fn: () => {
         svc.muted = !svc.muted; persist(); render();
       } }
   ];
-  if (idx > 0) items.push({ label: 'Move up', fn: () => swap(idx, idx - 1) });
-  if (idx < g.services.length - 1) items.push({ label: 'Move down', fn: () => swap(idx, idx + 1) });
 
-  const others = config.groups.filter((gr) => gr.id !== g.id);
-  if (others.length) {
+  if (canEdit) {
+    items.push({ label: 'Edit…', fn: () => openDialog(id) });
+    items.push({ label: svc.shared ? 'Switch to Private' : 'Switch to Shared', fn: () => {
+      svc.shared = !svc.shared; dropView(id); persist(); render();
+    } });
+    items.push({ label: 'Duplicate', fn: () => {
+      g.services.splice(idx + 1, 0, { id: uid(), name: svc.name, url: svc.url, shared: !!svc.shared, muted: !!svc.muted });
+      persist(); render();
+    } });
+    if (idx > 0) items.push({ label: 'Move up', fn: () => swap(idx, idx - 1) });
+    if (idx < g.services.length - 1) items.push({ label: 'Move down', fn: () => swap(idx, idx + 1) });
+
+    const others = config.groups.filter((gr) => gr.id !== g.id);
+    if (others.length) {
+      items.push({ sep: true });
+      items.push({ head: 'Move to group' });
+      others.forEach((tg) => items.push({ indent: true, label: tg.name, fn: () => moveServiceToGroup(id, tg.id) }));
+    }
     items.push({ sep: true });
-    items.push({ head: 'Move to group' });
-    others.forEach((tg) => items.push({ indent: true, label: tg.name, fn: () => moveServiceToGroup(id, tg.id) }));
+    items.push({ label: 'Remove', danger: true, fn: () => removeService(id) });
+  } else {
+    items.push({ sep: true });
+    items.push({ label: 'Unlock to edit…', fn: promptUnlock });
   }
-
-  items.push({ sep: true });
-  items.push({ label: 'Remove', danger: true, fn: () => removeService(id) });
   openMenu(x, y, items);
 }
 
@@ -362,10 +383,14 @@ function showGroupMenu() {
     items.push({ label: g.name, checked: g.id === config.activeGroupId, fn: () => setActiveGroup(g.id) });
   });
   items.push({ sep: true });
-  items.push({ label: 'New group', fn: () => openGroupDialog(null) });
-  items.push({ label: 'Duplicate group (same setup, separate logins)', fn: duplicateActiveGroup });
-  items.push({ label: 'Edit group (name & image)', fn: () => openGroupDialog(config.activeGroupId) });
-  items.push({ label: 'Delete group', danger: true, fn: deleteActiveGroup });
+  if (editingAllowed()) {
+    items.push({ label: 'New group', fn: () => openGroupDialog(null) });
+    items.push({ label: 'Duplicate group (same setup, separate logins)', fn: duplicateActiveGroup });
+    items.push({ label: 'Edit group (name & image)', fn: () => openGroupDialog(config.activeGroupId) });
+    items.push({ label: 'Delete group', danger: true, fn: deleteActiveGroup });
+  } else {
+    items.push({ label: 'Unlock to edit…', fn: promptUnlock });
+  }
   openMenu(r.right + 6, r.top, items);
 }
 groupBtn.addEventListener('click', (e) => { e.stopPropagation(); showGroupMenu(); });
@@ -520,14 +545,125 @@ form.addEventListener('submit', (e) => {
   render();
 });
 
-document.getElementById('addBtn').addEventListener('click', () => openDialog(null));
-document.getElementById('emptyAdd').addEventListener('click', () => openDialog(null));
+// ---- Settings, admin PIN, drag-reorder --------------------------------------
+const settingsBtn = document.getElementById('settingsBtn');
+const lockBtn = document.getElementById('lockBtn');
+const addBtnEl = document.getElementById('addBtn');
+const settingsDialog = document.getElementById('settingsDialog');
+const loginToggle = document.getElementById('loginToggle');
+const checkUpdateBtn = document.getElementById('checkUpdateBtn');
+const updateState = document.getElementById('updateState');
+const pinState = document.getElementById('pinState');
+const pinButtons = document.getElementById('pinButtons');
+const pinDialog = document.getElementById('pinDialog');
+const pinForm = document.getElementById('pinForm');
+const pinInput = document.getElementById('pinInput');
+const pinError = document.getElementById('pinError');
+const pinDlgTitle = document.getElementById('pinDlgTitle');
+
+let pinMode = 'unlock'; // 'unlock' | 'set' | 'change'
+
+async function sha256(text) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Editing the shared setup is allowed when there is no PIN, or this device is unlocked.
+function editingAllowed() { return !config.pinHash || !!config._unlocked; }
+
+function openPin(mode, title) {
+  pinMode = mode;
+  pinDlgTitle.textContent = title;
+  pinInput.value = '';
+  pinError.textContent = '';
+  pinDialog.showModal();
+  pinInput.focus();
+}
+function promptUnlock() { openPin('unlock', 'Enter admin PIN to edit'); }
+
+pinForm.addEventListener('submit', async (e) => {
+  if (e.submitter && e.submitter.value === 'cancel') { pinDialog.close(); return; }
+  e.preventDefault();
+  const val = pinInput.value.trim();
+  if (pinMode === 'unlock') {
+    const h = val ? await sha256(val) : '';
+    if (h && h === config.pinHash) { config._unlocked = true; pinDialog.close(); persist(); render(); refreshPinState(); }
+    else pinError.textContent = 'Wrong PIN — try again.';
+    return;
+  }
+  if (!val) { pinError.textContent = 'Enter a PIN.'; return; }
+  config.pinHash = await sha256(val);  // set or change → shared with everyone
+  config._unlocked = true;
+  pinDialog.close();
+  persist();
+  render();
+  refreshPinState();
+});
+
+function refreshPinState() {
+  const hasPin = !!config.pinHash;
+  const unlocked = !!config._unlocked;
+  pinButtons.innerHTML = '';
+  const add = (label, fn, cls) => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = cls || 'ghost'; b.textContent = label;
+    b.addEventListener('click', fn); pinButtons.appendChild(b);
+  };
+  if (!hasPin) {
+    pinState.textContent = 'No PIN set — anyone can add, edit or delete the shared setup.';
+    add('Set admin PIN', () => openPin('set', 'Set an admin PIN'), 'primary');
+  } else if (unlocked) {
+    pinState.textContent = 'PIN is set. This device is unlocked and can edit.';
+    add('Change PIN', () => openPin('change', 'Set a new admin PIN'));
+    add('Remove PIN', () => {
+      if (!confirm('Remove the admin PIN? Everyone will be able to edit again.')) return;
+      config.pinHash = null; config._unlocked = true; persist(); render(); refreshPinState();
+    });
+  } else {
+    pinState.textContent = 'PIN is set. Editing is locked (view-only on this device).';
+    add('Unlock', () => promptUnlock(), 'primary');
+  }
+}
+
+async function openSettings() {
+  try { loginToggle.checked = await window.hub.getLoginItem(); } catch (_) {}
+  updateState.textContent = 'Updates install automatically.';
+  refreshPinState();
+  settingsDialog.showModal();
+}
+
+settingsBtn.addEventListener('click', openSettings);
+lockBtn.addEventListener('click', promptUnlock);
+loginToggle.addEventListener('change', () => window.hub.setLoginItem(loginToggle.checked));
+checkUpdateBtn.addEventListener('click', async () => {
+  updateState.textContent = 'Checking for updates…';
+  await window.hub.checkForUpdate();
+  setTimeout(() => { if (updateState.textContent === 'Checking for updates…') updateState.textContent = "You're up to date."; }, 5000);
+});
+
+// Drag-reorder service tiles within the active group.
+let dragId = null;
+function reorderService(fromId, toId) {
+  const g = activeGroup();
+  const from = g.services.findIndex((s) => s.id === fromId);
+  if (from < 0) return;
+  const [moved] = g.services.splice(from, 1);
+  const to = g.services.findIndex((s) => s.id === toId);
+  g.services.splice(to < 0 ? g.services.length : to, 0, moved);
+  persist();
+  render();
+}
+
+addBtnEl.addEventListener('click', () => { if (editingAllowed()) openDialog(null); else promptUnlock(); });
+document.getElementById('emptyAdd').addEventListener('click', () => { if (editingAllowed()) openDialog(null); else promptUnlock(); });
 
 // ---- Boot -------------------------------------------------------------------
 function normalizeConfig(cfg) {
   if (!cfg || !Array.isArray(cfg.groups)) cfg = { version: 2, activeGroupId: null, groups: [] };
   cfg.dnd = !!cfg.dnd;
   cfg.templateVersion = cfg.templateVersion || 0;
+  cfg.pinHash = cfg.pinHash || null;      // shared: whether an admin PIN is set
+  cfg._unlocked = !!cfg._unlocked;        // local: did this device enter the PIN
   cfg.groups.forEach((g) => {
     g.id = g.id || uid('g');
     g.name = g.name || 'Group';

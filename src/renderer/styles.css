@@ -239,6 +239,23 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.55); backdrop-filter: blur(3px); 
 .menu-sep { height: 1px; background: var(--line); margin: 6px 6px; }
 .menu-head { font-size: 11px; color: var(--muted); padding: 6px 11px 3px; }
 
+/* ===== Settings / PIN dialogs ============================================ */
+#settingsForm, #pinForm { padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+#settingsForm h2, #pinForm h2 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -0.01em; }
+#settingsForm label, #pinForm label { display: flex; flex-direction: column; gap: 7px; font-size: 12px; color: var(--muted); }
+#pinForm input {
+  background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 10px;
+  padding: 11px 13px; color: var(--text); font-size: 18px; letter-spacing: 6px; text-align: center; user-select: text;
+}
+#pinForm input:focus { outline: none; border-color: var(--focus); box-shadow: 0 0 0 3px rgba(139, 123, 255, 0.2); }
+#settingsForm .switch { flex-direction: row; align-items: center; gap: 10px; font-size: 13px; color: var(--text); cursor: pointer; }
+#settingsForm .switch input { width: auto; margin: 0; accent-color: var(--brand-1); }
+.set-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.set-row b { font-size: 13px; }
+#pinButtons { justify-content: flex-start; flex-wrap: wrap; }
+
+.rail-btn.dragging { opacity: 0.4; }
+
 /* ===== Update toast ====================================================== */
 .toast {
   position: fixed; right: 18px; bottom: 18px; z-index: 60;

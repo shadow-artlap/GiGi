@@ -17,7 +17,9 @@
         <div id="services" class="services"></div>
         <button id="addBtn" class="rail-btn add" title="Add a service">+</button>
       </div>
+      <button id="lockBtn" class="rail-btn dnd hidden" title="Editing is locked — click to unlock">🔒</button>
       <button id="dndBtn" class="rail-btn dnd" title="Do Not Disturb — silence all alerts">☾</button>
+      <button id="settingsBtn" class="rail-btn dnd" title="Settings">⚙</button>
     </nav>
 
     <!-- Right side: stacked webviews, one shown at a time -->
@@ -57,6 +59,42 @@
       <div class="row">
         <button value="cancel" class="ghost" type="submit" formnovalidate>Cancel</button>
         <button value="ok" class="primary" id="svcSave" type="submit">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Settings -->
+  <dialog id="settingsDialog">
+    <form method="dialog" id="settingsForm">
+      <h2>Settings</h2>
+      <label class="switch">
+        <input type="checkbox" id="loginToggle" />
+        <span>Launch GiGi when Windows starts</span>
+      </label>
+      <div class="set-row">
+        <div><b>Updates</b><div class="hint" id="updateState">&nbsp;</div></div>
+        <button type="button" id="checkUpdateBtn" class="ghost">Check now</button>
+      </div>
+      <fieldset class="modes">
+        <legend>Admin lock</legend>
+        <p class="hint" id="pinState">&nbsp;</p>
+        <div class="row" id="pinButtons"></div>
+      </fieldset>
+      <div class="row"><button value="ok" class="primary" type="submit">Done</button></div>
+    </form>
+  </dialog>
+
+  <!-- PIN entry -->
+  <dialog id="pinDialog">
+    <form method="dialog" id="pinForm">
+      <h2 id="pinDlgTitle">Enter admin PIN</h2>
+      <label>PIN
+        <input id="pinInput" type="password" inputmode="numeric" autocomplete="off" placeholder="••••" />
+      </label>
+      <p class="hint" id="pinError">&nbsp;</p>
+      <div class="row">
+        <button value="cancel" class="ghost" type="submit" formnovalidate>Cancel</button>
+        <button value="ok" class="primary" type="submit">OK</button>
       </div>
     </form>
   </dialog>

@@ -121,9 +121,12 @@ const CLOUD_NODE = 'https://gigi-9fd87-default-rtdb.asia-southeast1.firebasedata
 
 let lastSharedJson = null; // the shared structure we last pushed or pulled
 
-// The subset of the config that is shared with everyone.
+// The subset of the config that is shared with everyone (the setup + the admin
+// PIN hash, if one is set). Local-only state (active tab, mute, DND, unlock) is
+// never shared.
 function sharedView(config) {
   return {
+    pinHash: config.pinHash || null,
     groups: (config.groups || []).map((g) => ({
       id: g.id, name: g.name, icon: g.icon || null,
       services: (g.services || []).map((s) => ({ id: s.id, name: s.name, url: s.url, shared: !!s.shared }))
@@ -132,10 +135,13 @@ function sharedView(config) {
 }
 // Canonical JSON of the shared structure. Firebase drops empty arrays and null
 // fields, so we normalize both sides before comparing to avoid false "changed".
-const structJson = (shared) => JSON.stringify(((shared && shared.groups) || []).map((g) => ({
-  id: g.id, name: g.name, icon: g.icon || null,
-  services: (g.services || []).map((s) => ({ id: s.id, name: s.name, url: s.url, shared: !!s.shared }))
-})));
+const structJson = (shared) => JSON.stringify({
+  pinHash: (shared && shared.pinHash) || null,
+  groups: ((shared && shared.groups) || []).map((g) => ({
+    id: g.id, name: g.name, icon: g.icon || null,
+    services: (g.services || []).map((s) => ({ id: s.id, name: s.name, url: s.url, shared: !!s.shared }))
+  }))
+});
 
 function cloudRequest(method, body) {
   return new Promise((resolve) => {
@@ -165,6 +171,7 @@ const pushCloud = (shared) => cloudRequest('PUT', shared);
 // Replace the local config's shared structure with the cloud's, keeping each
 // user's local-only state (active tab, per-tab mute).
 function applySharedToLocal(local, shared) {
+  local.pinHash = shared.pinHash || null;
   const muted = new Set();
   (local.groups || []).forEach((g) => (g.services || []).forEach((s) => { if (s.muted) muted.add(s.id); }));
   local.groups = (shared.groups || []).map((g) => ({
@@ -209,6 +216,44 @@ function pushIfChanged() {
   if (json === lastSharedJson) return;
   lastSharedJson = json;
   pushCloud(sharedView(currentConfig));
+}
+
+// Debounce so a burst of stream events triggers a single pull.
+let syncTimer = null;
+function scheduleSync() {
+  if (syncTimer) return;
+  syncTimer = setTimeout(() => { syncTimer = null; syncFromCloud(); }, 250);
+}
+
+// Realtime: hold an EventSource-style stream open to Firebase; any change pings
+// us to pull immediately. Reconnects on drop; the periodic poll is a fallback.
+let streamReq = null;
+function startRealtime() {
+  try {
+    if (streamReq) { try { streamReq.abort(); } catch (_) {} }
+    const req = net.request({ method: 'GET', url: CLOUD_NODE });
+    req.setHeader('Accept', 'text/event-stream');
+    streamReq = req;
+    let buffer = '';
+    let lastEvent = '';
+    const reconnect = () => { if (streamReq === req) { streamReq = null; setTimeout(startRealtime, 3000); } };
+    req.on('response', (res) => {
+      if (res.statusCode < 200 || res.statusCode >= 300) { reconnect(); return; }
+      res.on('data', (chunk) => {
+        buffer += chunk.toString();
+        let nl;
+        while ((nl = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, nl); buffer = buffer.slice(nl + 1);
+          if (line.startsWith('event:')) lastEvent = line.slice(6).trim();
+          else if (line.startsWith('data:') && (lastEvent === 'put' || lastEvent === 'patch')) scheduleSync();
+        }
+      });
+      res.on('end', reconnect);
+      res.on('error', reconnect);
+    });
+    req.on('error', reconnect);
+    req.end();
+  } catch (_) { setTimeout(startRealtime, 5000); }
 }
 
 // Atomic save: write a temp file, then rename over the real file (rename is atomic
@@ -317,6 +362,12 @@ function initUpdater() {
   // The in-app banner's "Restart" button triggers the install.
   ipcMain.on('update:install', () => { isQuitting = true; try { autoUpdater.quitAndInstall(); } catch (_) {} });
 
+  // Manual "check for updates now" from Settings.
+  ipcMain.handle('update:check', () => {
+    autoUpdater.checkForUpdates().catch(() => {});
+    return true;
+  });
+
   const check = () => autoUpdater.checkForUpdates().catch(() => {});
   check();                                     // on launch
   setInterval(check, 6 * 60 * 60 * 1000);      // then every 6 hours
@@ -340,6 +391,12 @@ function wireWebContents() {
 }
 
 // ---- IPC (renderer <-> main) --------------------------------------------------
+// Launch GiGi when the user signs in to Windows.
+ipcMain.handle('settings:get-login', () => { try { return app.getLoginItemSettings().openAtLogin; } catch (_) { return false; } });
+ipcMain.handle('settings:set-login', (_e, enable) => {
+  try { app.setLoginItemSettings({ openAtLogin: !!enable }); return true; } catch (_) { return false; }
+});
+
 ipcMain.handle('config:get', () => currentConfig || (currentConfig = loadConfig()));
 ipcMain.handle('config:save', (_e, config) => {
   currentConfig = config;
@@ -425,7 +482,8 @@ if (!app.requestSingleInstanceLock()) {
     initUpdater();
 
     syncFromCloud();                               // pull the shared setup now
-    setInterval(syncFromCloud, 6000);             // then keep in sync every 6s
+    startRealtime();                               // live updates (instant)
+    setInterval(syncFromCloud, 30000);            // fallback poll if the stream drops
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();

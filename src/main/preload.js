@@ -21,6 +21,9 @@ contextBridge.exposeInMainWorld('hub', {
   onUpdateStatus: (cb) => ipcRenderer.on('update:status', (_e, payload) => cb(payload)),
   installUpdate: () => ipcRenderer.send('update:install'),
   onConfigUpdated: (cb) => ipcRenderer.on('config:updated', (_e, config) => cb(config)),
+  getLoginItem: () => ipcRenderer.invoke('settings:get-login'),
+  setLoginItem: (enable) => ipcRenderer.invoke('settings:set-login', enable),
+  checkForUpdate: () => ipcRenderer.invoke('update:check').catch(() => false),
 
   setBadge: (count) => ipcRenderer.send('badge:set', count),
   flash: () => ipcRenderer.send('window:flash')
