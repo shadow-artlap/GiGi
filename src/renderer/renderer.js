@@ -550,7 +550,8 @@ window.hub.onConfigUpdated((newCfg) => {
 });
 
 (async function init() {
+  // Load the local cache; the shared cloud config arrives via onConfigUpdated.
+  // Don't persist here — that would push this machine's cache over everyone else.
   config = normalizeConfig(await window.hub.getConfig());
   render();
-  await persist();
 })();

@@ -112,65 +112,103 @@ function fetchRemoteTemplate() {
   });
 }
 
-const tplSvc = (s) => ({ id: s.id, name: s.name, url: s.url, shared: !!s.shared, muted: false, tpl: true });
+// ---- Two-way shared sync (Firebase Realtime Database via REST) ---------------
+// Everyone reads AND writes one shared setup, so any user's added/renamed/removed
+// group or service shows up for everyone. Only the shared STRUCTURE syncs; each
+// user's active tab, Do Not Disturb and per-tab mute stay local, and logins
+// (sessions) are always local to each machine.
+const CLOUD_NODE = 'https://gigi-9fd87-default-rtdb.asia-southeast1.firebasedatabase.app/config.json';
 
-function seedFromTemplate(tpl, ver) {
-  const groups = (tpl.groups || []).map((g) => ({
-    id: g.id, name: g.name, icon: g.icon || null, tpl: true,
-    services: (g.services || []).map(tplSvc)
-  }));
-  if (!groups.length) groups.push({ id: 'g_default', name: 'Default', services: [] });
-  return { version: 2, templateVersion: ver, activeGroupId: groups[0].id, groups };
+let lastSharedJson = null; // the shared structure we last pushed or pulled
+
+// The subset of the config that is shared with everyone.
+function sharedView(config) {
+  return {
+    groups: (config.groups || []).map((g) => ({
+      id: g.id, name: g.name, icon: g.icon || null,
+      services: (g.services || []).map((s) => ({ id: s.id, name: s.name, url: s.url, shared: !!s.shared }))
+    }))
+  };
 }
+// Canonical JSON of the shared structure. Firebase drops empty arrays and null
+// fields, so we normalize both sides before comparing to avoid false "changed".
+const structJson = (shared) => JSON.stringify(((shared && shared.groups) || []).map((g) => ({
+  id: g.id, name: g.name, icon: g.icon || null,
+  services: (g.services || []).map((s) => ({ id: s.id, name: s.name, url: s.url, shared: !!s.shared }))
+})));
 
-// Merge a newer template into the local config: template items (marked tpl) are
-// added/updated/removed to match, while the user's own additions and all logins
-// are left untouched.
-function mergeTemplate(local, tpl, ver) {
-  const tplGroupIds = new Set((tpl.groups || []).map((g) => g.id));
-  (tpl.groups || []).forEach((tg) => {
-    let lg = local.groups.find((g) => g.id === tg.id);
-    if (!lg) { lg = { id: tg.id, name: tg.name, icon: tg.icon || null, tpl: true, services: [] }; local.groups.push(lg); }
-    else { lg.name = tg.name; lg.icon = tg.icon || null; lg.tpl = true; }
-
-    const tplSvcIds = new Set((tg.services || []).map((s) => s.id));
-    (tg.services || []).forEach((ts) => {
-      const ls = lg.services.find((s) => s.id === ts.id);
-      if (!ls) lg.services.push(tplSvc(ts));
-      else { ls.name = ts.name; ls.url = ts.url; ls.shared = !!ts.shared; ls.tpl = true; } // keep user's muted
-    });
-    // Drop template-origin services the owner removed; keep user-added ones.
-    lg.services = lg.services.filter((s) => !(s.tpl === true && !tplSvcIds.has(s.id)));
+function cloudRequest(method, body) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+    try {
+      const req = net.request({ method, url: CLOUD_NODE });
+      const timer = setTimeout(() => { try { req.abort(); } catch (_) {} done(null); }, 8000);
+      req.on('response', (res) => {
+        let data = '';
+        res.on('data', (c) => { data += c; });
+        res.on('end', () => {
+          clearTimeout(timer);
+          if (res.statusCode < 200 || res.statusCode >= 300) { done(null); return; }
+          try { done(data ? JSON.parse(data) : null); } catch (_) { done(null); }
+        });
+      });
+      req.on('error', () => { clearTimeout(timer); done(null); });
+      if (body !== undefined) { req.setHeader('Content-Type', 'application/json'); req.write(JSON.stringify(body)); }
+      req.end();
+    } catch (_) { done(null); }
   });
-  // Drop template-origin groups the owner removed; keep user-added groups.
-  local.groups = local.groups.filter((g) => !(g.tpl === true && !tplGroupIds.has(g.id)));
+}
+const fetchCloud = () => cloudRequest('GET');
+const pushCloud = (shared) => cloudRequest('PUT', shared);
+
+// Replace the local config's shared structure with the cloud's, keeping each
+// user's local-only state (active tab, per-tab mute).
+function applySharedToLocal(local, shared) {
+  const muted = new Set();
+  (local.groups || []).forEach((g) => (g.services || []).forEach((s) => { if (s.muted) muted.add(s.id); }));
+  local.groups = (shared.groups || []).map((g) => ({
+    id: g.id, name: g.name, icon: g.icon || null,
+    services: (g.services || []).map((s) => ({
+      id: s.id, name: s.name, url: s.url, shared: !!s.shared, muted: muted.has(s.id)
+    }))
+  }));
   if (!local.groups.length) local.groups.push({ id: 'g_default', name: 'Default', services: [] });
-  local.templateVersion = ver;
-  return true;
 }
 
-async function applyRemoteTemplate(firstRun) {
-  const tpl = await fetchRemoteTemplate();
-  if (!tpl || !Array.isArray(tpl.groups)) return;
-  const ver = Number(tpl.templateVersion) || 1;
+// Pull the shared setup; seed the cloud the first time it is empty.
+async function syncFromCloud() {
+  const cloud = await fetchCloud();
 
-  const untemplated = (currentConfig.templateVersion || 0) === 0;
-  const empty = !currentConfig.groups.some((g) => (g.services || []).length);
-
-  let changed = false;
-  try {
-    if (firstRun || (untemplated && empty)) {
-      currentConfig = seedFromTemplate(tpl, ver);   // brand-new install → use the template
-      changed = true;
-    } else if (ver > (currentConfig.templateVersion || 0)) {
-      changed = mergeTemplate(currentConfig, tpl, ver);  // owner published an update
+  if (!cloud || !Array.isArray(cloud.groups) || !cloud.groups.length) {
+    let seed = sharedView(currentConfig);
+    if (!seed.groups.length || !seed.groups.some((g) => g.services.length)) {
+      const tpl = await fetchRemoteTemplate();          // GitHub starter template
+      if (tpl && Array.isArray(tpl.groups)) seed = sharedView(tpl);
     }
-  } catch (err) { console.error('Template merge failed:', err); }
-
-  if (changed) {
-    saveConfig(currentConfig);
-    if (win && !win.isDestroyed()) win.webContents.send('config:updated', currentConfig);
+    if (seed.groups.length && lastSharedJson === null) {
+      await pushCloud(seed);
+      lastSharedJson = structJson(seed);
+    }
+    return;
   }
+
+  const cloudJson = structJson(cloud);
+  if (cloudJson === lastSharedJson) return; // nothing new since our last sync
+
+  applySharedToLocal(currentConfig, cloud);   // someone changed it → adopt it
+  lastSharedJson = cloudJson;
+  saveConfig(currentConfig);
+  if (win && !win.isDestroyed()) win.webContents.send('config:updated', currentConfig);
+}
+
+// After a local edit: push to everyone only when the shared structure changed
+// (not for a tab switch, a mute, or Do Not Disturb — those stay local).
+function pushIfChanged() {
+  const json = structJson(sharedView(currentConfig));
+  if (json === lastSharedJson) return;
+  lastSharedJson = json;
+  pushCloud(sharedView(currentConfig));
 }
 
 // Atomic save: write a temp file, then rename over the real file (rename is atomic
@@ -303,7 +341,12 @@ function wireWebContents() {
 
 // ---- IPC (renderer <-> main) --------------------------------------------------
 ipcMain.handle('config:get', () => currentConfig || (currentConfig = loadConfig()));
-ipcMain.handle('config:save', (_e, config) => { currentConfig = config; return saveConfig(config); });
+ipcMain.handle('config:save', (_e, config) => {
+  currentConfig = config;
+  const ok = saveConfig(config);
+  pushIfChanged(); // share structural edits with everyone
+  return ok;
+});
 
 // Let the user pick an image for a group; return it as a small 64x64 PNG data URL
 // so it stores inline in the config (no extra files to manage).
@@ -373,18 +416,16 @@ if (!app.requestSingleInstanceLock()) {
     // grouped under the app) instead of a generic host.
     if (process.platform === 'win32') app.setAppUserModelId('com.gigi.app');
 
-    // Load local config now (fast, offline-safe); pull the shared template after.
-    const hadConfig = fs.existsSync(CONFIG_FILE) || fs.existsSync(CONFIG_BAK);
+    // Load local config now (fast, offline-safe); the shared cloud syncs after.
     currentConfig = loadConfig();
-    currentConfig.templateVersion = currentConfig.templateVersion || 0;
 
     wireWebContents();
     createWindow();
     createTray();
     initUpdater();
 
-    applyRemoteTemplate(!hadConfig);                           // on launch
-    setInterval(() => applyRemoteTemplate(false), 30 * 60 * 1000); // then every 30 min
+    syncFromCloud();                               // pull the shared setup now
+    setInterval(syncFromCloud, 6000);             // then keep in sync every 6s
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
