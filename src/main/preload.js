@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('hub', {
   setNotifyBlock: (partitions) => ipcRenderer.send('notify:block-set', partitions),
   onUpdateStatus: (cb) => ipcRenderer.on('update:status', (_e, payload) => cb(payload)),
   installUpdate: () => ipcRenderer.send('update:install'),
+  onConfigUpdated: (cb) => ipcRenderer.on('config:updated', (_e, config) => cb(config)),
 
   setBadge: (count) => ipcRenderer.send('badge:set', count),
   flash: () => ipcRenderer.send('window:flash')

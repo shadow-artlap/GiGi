@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, dialog, session } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, dialog, session, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -9,6 +9,14 @@ const CONFIG_FILE = path.join(app.getPath('userData'), 'services.json');
 const CONFIG_BAK = path.join(app.getPath('userData'), 'services.bak.json');
 const CONFIG_TMP = path.join(app.getPath('userData'), 'services.tmp.json');
 const ICON_FILE = path.join(__dirname, '..', '..', 'assets', 'icon.png');
+
+// Shared "template" (groups/services setup) the owner publishes to GitHub.
+// Every install pulls it so they all start from the same setup; each user can
+// still add their own tabs, and logins always stay local (per-install sessions).
+const REMOTE_CONFIG_URL = 'https://raw.githubusercontent.com/shadow-artlap/GiGi/main/app-config.json';
+
+// The in-memory config the whole app shares this session.
+let currentConfig = null;
 
 // A few popular services to start with. The user can add/remove/reorder freely;
 // adding the same service twice gives two independent logins (separate sessions).
@@ -74,12 +82,93 @@ function loadConfig() {
     return { version: 2, activeGroupId: 'g_default', groups: [{ id: 'g_default', name: 'Default', services: [] }] };
   }
 
-  // Genuine first run: seed the default services.
+  // Genuine first run: start empty; the shared template (below) fills it in.
+  // If the template can't be reached (offline), DEFAULT_SERVICES seed it instead.
   return {
     version: 2,
     activeGroupId: 'g_default',
-    groups: [{ id: 'g_default', name: 'Default', services: DEFAULT_SERVICES.map(normSvc) }]
+    templateVersion: 0,
+    groups: [{ id: 'g_default', name: 'Default', services: [] }]
   };
+}
+
+// ---- Shared template: fetch + merge -----------------------------------------
+function fetchRemoteTemplate() {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+    try {
+      const req = net.request(REMOTE_CONFIG_URL + '?t=' + Date.now());
+      const timer = setTimeout(() => { try { req.abort(); } catch (_) {} done(null); }, 8000);
+      req.on('response', (res) => {
+        if (res.statusCode < 200 || res.statusCode >= 300) { clearTimeout(timer); done(null); return; }
+        let data = '';
+        res.on('data', (c) => { data += c; });
+        res.on('end', () => { clearTimeout(timer); try { done(JSON.parse(data)); } catch (_) { done(null); } });
+      });
+      req.on('error', () => { clearTimeout(timer); done(null); });
+      req.end();
+    } catch (_) { done(null); }
+  });
+}
+
+const tplSvc = (s) => ({ id: s.id, name: s.name, url: s.url, shared: !!s.shared, muted: false, tpl: true });
+
+function seedFromTemplate(tpl, ver) {
+  const groups = (tpl.groups || []).map((g) => ({
+    id: g.id, name: g.name, icon: g.icon || null, tpl: true,
+    services: (g.services || []).map(tplSvc)
+  }));
+  if (!groups.length) groups.push({ id: 'g_default', name: 'Default', services: [] });
+  return { version: 2, templateVersion: ver, activeGroupId: groups[0].id, groups };
+}
+
+// Merge a newer template into the local config: template items (marked tpl) are
+// added/updated/removed to match, while the user's own additions and all logins
+// are left untouched.
+function mergeTemplate(local, tpl, ver) {
+  const tplGroupIds = new Set((tpl.groups || []).map((g) => g.id));
+  (tpl.groups || []).forEach((tg) => {
+    let lg = local.groups.find((g) => g.id === tg.id);
+    if (!lg) { lg = { id: tg.id, name: tg.name, icon: tg.icon || null, tpl: true, services: [] }; local.groups.push(lg); }
+    else { lg.name = tg.name; lg.icon = tg.icon || null; lg.tpl = true; }
+
+    const tplSvcIds = new Set((tg.services || []).map((s) => s.id));
+    (tg.services || []).forEach((ts) => {
+      const ls = lg.services.find((s) => s.id === ts.id);
+      if (!ls) lg.services.push(tplSvc(ts));
+      else { ls.name = ts.name; ls.url = ts.url; ls.shared = !!ts.shared; ls.tpl = true; } // keep user's muted
+    });
+    // Drop template-origin services the owner removed; keep user-added ones.
+    lg.services = lg.services.filter((s) => !(s.tpl === true && !tplSvcIds.has(s.id)));
+  });
+  // Drop template-origin groups the owner removed; keep user-added groups.
+  local.groups = local.groups.filter((g) => !(g.tpl === true && !tplGroupIds.has(g.id)));
+  if (!local.groups.length) local.groups.push({ id: 'g_default', name: 'Default', services: [] });
+  local.templateVersion = ver;
+  return true;
+}
+
+async function applyRemoteTemplate(firstRun) {
+  const tpl = await fetchRemoteTemplate();
+  if (!tpl || !Array.isArray(tpl.groups)) return;
+  const ver = Number(tpl.templateVersion) || 1;
+
+  const untemplated = (currentConfig.templateVersion || 0) === 0;
+  const empty = !currentConfig.groups.some((g) => (g.services || []).length);
+
+  let changed = false;
+  if (firstRun || (untemplated && empty)) {
+    currentConfig = seedFromTemplate(tpl, ver);   // brand-new install → use the template
+    changed = true;
+  } else if (ver > (currentConfig.templateVersion || 0)) {
+    changed = mergeTemplate(currentConfig, tpl, ver);  // owner published an update
+  }
+
+  if (changed) {
+    saveConfig(currentConfig);
+    if (win && !win.isDestroyed()) win.webContents.send('config:updated', currentConfig);
+  }
 }
 
 // Atomic save: write a temp file, then rename over the real file (rename is atomic
@@ -211,8 +300,8 @@ function wireWebContents() {
 }
 
 // ---- IPC (renderer <-> main) --------------------------------------------------
-ipcMain.handle('config:get', () => loadConfig());
-ipcMain.handle('config:save', (_e, config) => saveConfig(config));
+ipcMain.handle('config:get', () => currentConfig || (currentConfig = loadConfig()));
+ipcMain.handle('config:save', (_e, config) => { currentConfig = config; return saveConfig(config); });
 
 // Let the user pick an image for a group; return it as a small 64x64 PNG data URL
 // so it stores inline in the config (no extra files to manage).
@@ -281,10 +370,19 @@ if (!app.requestSingleInstanceLock()) {
     // Lets Windows attribute toast notifications to GiGi (correct name/icon,
     // grouped under the app) instead of a generic host.
     if (process.platform === 'win32') app.setAppUserModelId('com.gigi.app');
+
+    // Load local config now (fast, offline-safe); pull the shared template after.
+    const hadConfig = fs.existsSync(CONFIG_FILE) || fs.existsSync(CONFIG_BAK);
+    currentConfig = loadConfig();
+    currentConfig.templateVersion = currentConfig.templateVersion || 0;
+
     wireWebContents();
     createWindow();
     createTray();
     initUpdater();
+
+    applyRemoteTemplate(!hadConfig);                           // on launch
+    setInterval(() => applyRemoteTemplate(false), 30 * 60 * 1000); // then every 30 min
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();

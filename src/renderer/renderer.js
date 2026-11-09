@@ -524,19 +524,33 @@ document.getElementById('addBtn').addEventListener('click', () => openDialog(nul
 document.getElementById('emptyAdd').addEventListener('click', () => openDialog(null));
 
 // ---- Boot -------------------------------------------------------------------
-(async function init() {
-  config = await window.hub.getConfig();
-  if (!config || !Array.isArray(config.groups)) {
-    config = { version: 2, activeGroupId: null, groups: [] };
-  }
-  config.dnd = !!config.dnd;
-  config.groups.forEach((g) => {
+function normalizeConfig(cfg) {
+  if (!cfg || !Array.isArray(cfg.groups)) cfg = { version: 2, activeGroupId: null, groups: [] };
+  cfg.dnd = !!cfg.dnd;
+  cfg.templateVersion = cfg.templateVersion || 0;
+  cfg.groups.forEach((g) => {
     g.id = g.id || uid('g');
     g.name = g.name || 'Group';
     g.icon = g.icon || null;
-    g.services = (g.services || []).map((s) => ({ id: s.id || uid(), name: s.name, url: s.url, shared: !!s.shared, muted: !!s.muted }));
+    g.tpl = !!g.tpl;
+    g.services = (g.services || []).map((s) => ({
+      id: s.id || uid(), name: s.name, url: s.url, shared: !!s.shared, muted: !!s.muted, tpl: !!s.tpl
+    }));
     if (g.activeServiceId && !g.services.some((s) => s.id === g.activeServiceId)) g.activeServiceId = null;
   });
+  return cfg;
+}
+
+// When the shared template is fetched or the owner publishes an update, main
+// sends the merged config here so the rail refreshes without a restart.
+window.hub.onConfigUpdated((newCfg) => {
+  if (!newCfg) return;
+  config = normalizeConfig(newCfg);
+  render();
+});
+
+(async function init() {
+  config = normalizeConfig(await window.hub.getConfig());
   render();
   await persist();
 })();
