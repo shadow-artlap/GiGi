@@ -86,6 +86,19 @@ html, body {
 
 .rail-divider { width: 36px; height: 1px; background: var(--line); margin: 2px 0; flex: 0 0 auto; }
 
+/* Unread waiting in other groups (the group button clips its own content). */
+.group-wrap { position: relative; flex: 0 0 auto; }
+.group-dot {
+  position: absolute; top: -5px; right: -5px;
+  min-width: 18px; height: 18px; padding: 0 5px;
+  border-radius: 9px;
+  background: var(--danger); color: #fff;
+  font-size: 11px; font-weight: 700; line-height: 18px; text-align: center;
+  box-shadow: 0 0 0 2px var(--rail);
+  pointer-events: none;
+}
+.group-dot.hidden { display: none; }
+
 /* Service tiles */
 .rail-btn {
   position: relative;
@@ -122,7 +135,19 @@ html, body {
   box-shadow: 0 0 0 2px var(--rail);
 }
 .rail-btn .badge.hidden { display: none; }
+.rail-btn.hidden { display: none; } /* lock button without a PIN, "+" while locked */
 .rail-btn.muted .badge { background: #4b4f5a; }
+
+/* Muted on this device: small speaker-off chip, top-left. */
+.rail-btn .mute-mark {
+  position: absolute; top: -4px; left: -4px;
+  width: 17px; height: 17px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: #2b2e37; color: var(--muted);
+  box-shadow: 0 0 0 2px var(--rail);
+  pointer-events: none;
+}
+.rail-btn .mute-mark svg { width: 11px; height: 11px; }
 
 /* Shared-login marker (small brand dot) */
 .rail-btn.shared::after {

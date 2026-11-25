@@ -1,59 +1,100 @@
 'use strict';
 
-// Runs inside each embedded service (isolated, no node access to the page).
-// It reports an unread count to the host window and signals incoming notifications,
-// then lets the native notification go through as usual.
+// Runs inside each embedded service. Reports the site's own unread signals to
+// the host window:
+//   'title'  — a count the site puts in its tab title, e.g. "(3) WhatsApp" (null if none)
+//   'badge'  — a count the site sets with navigator.setAppBadge() (most exact)
+//   'notify' — the site showed a notification (fallback for sites with no count)
+// Notifications still go through normally.
 
-const { ipcRenderer } = require('electron');
+const { ipcRenderer, webFrame } = require('electron');
 
-// Pull the first small number out of the tab title, e.g. "(3) WhatsApp",
-// "Inbox (12) - Gmail", "• 5 Slack". This is the same heuristic most
-// multi-messenger apps use; it covers the majority of web services.
-function unreadFromTitle() {
-  const title = document.title || '';
-  const match = title.match(/[\(\[]?\s*(\d{1,4})\s*[\)\]]?/);
-  if (!match) return 0;
-  const n = parseInt(match[1], 10);
-  return Number.isFinite(n) ? n : 0;
+const send = (channel, value) => { try { ipcRenderer.sendToHost(channel, value); } catch (_) {} };
+
+// Only accept numbers in the usual unread formats, so titles that merely
+// contain a number ("Ads 2", "2024 report") aren't mistaken for a count.
+function countFromTitle() {
+  const t = document.title || '';
+  const m = t.match(/^\s*[(\[]\s*(\d{1,4})\+?\s*[)\]]/)               // "(3) WhatsApp", "[12] Inbox"
+    || t.match(/[(\[]\s*(\d{1,4})\+?\s*[)\]]/)                         // "Inbox (12) - Gmail"
+    || t.match(/(\d{1,4})\+?\s*(?:unread|new|messages?|notifications?|ข้อความ|รายการใหม่)/i)
+    || t.match(/^\s*[•·●*]\s*(\d{1,4})/);                              // "• 5 Slack"
+  return m ? parseInt(m[1], 10) : null;
 }
 
-function report() {
-  try { ipcRenderer.sendToHost('unread', unreadFromTitle()); } catch (_) {}
+let lastTitleCount;
+function reportTitle(force) {
+  const n = countFromTitle();
+  if (force || n !== lastTitleCount) { lastTitleCount = n; send('title', n); }
 }
 
-// React to title changes, and poll as a safety net for services that
-// update their title through the History API or inside a frame.
 function watchTitle() {
   const titleEl = document.querySelector('title');
   if (titleEl) {
-    new MutationObserver(report).observe(titleEl, {
-      subtree: true, childList: true, characterData: true
-    });
+    new MutationObserver(() => reportTitle(false)).observe(titleEl, { subtree: true, childList: true, characterData: true });
   }
-  setInterval(report, 4000);
-  report();
+  // Safety net for titles changed in ways the observer misses (e.g. replaced <title>).
+  setInterval(() => reportTitle(false), 3000);
+  reportTitle(true);
 }
 
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', watchTitle);
-} else {
-  watchTitle();
-}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', watchTitle);
+else watchTitle();
 
-// Wrap the Notification API so we can flash the window / bump the counter,
-// while still showing the real OS notification.
-try {
-  const Native = window.Notification;
-  if (Native) {
-    const Wrapped = function (title, options) {
-      try { ipcRenderer.sendToHost('notify', { title: String(title || ''), body: options && options.body }); } catch (_) {}
-      return new Native(title, options);
-    };
-    Wrapped.maxActions = Native.maxActions;
-    Object.defineProperty(Wrapped, 'permission', { get: () => Native.permission });
-    Wrapped.requestPermission = Native.requestPermission
-      ? Native.requestPermission.bind(Native)
-      : () => Promise.resolve('granted');
-    Object.defineProperty(window, 'Notification', { value: Wrapped, configurable: true, writable: true });
-  }
-} catch (_) { /* some pages lock Notification down; ignore */ }
+// The page's own Notification / setAppBadge live in its main world, which this
+// isolated preload can't patch directly. Inject a small hook there; it reports
+// back with window.postMessage, which we relay to the host.
+const MAIN_WORLD_HOOK = `(() => {
+  if (window.__gigiHooked) return;
+  window.__gigiHooked = true;
+  const post = (type, data) => { try { window.postMessage({ __gigi: type, data }, '*'); } catch (_) {} };
+
+  try {
+    const N = window.Notification;
+    if (N) {
+      const Wrapped = function (title, options) {
+        post('notify', { title: String(title || '') });
+        return new N(title, options);
+      };
+      Wrapped.prototype = N.prototype;
+      Object.defineProperty(Wrapped, 'permission', { get: () => N.permission });
+      Wrapped.requestPermission = (...args) => N.requestPermission(...args);
+      Wrapped.maxActions = N.maxActions;
+      window.Notification = Wrapped;
+    }
+  } catch (_) {}
+
+  try {
+    const proto = window.ServiceWorkerRegistration && window.ServiceWorkerRegistration.prototype;
+    if (proto && proto.showNotification) {
+      const original = proto.showNotification;
+      proto.showNotification = function (title, options) {
+        post('notify', { title: String(title || '') });
+        return original.call(this, title, options);
+      };
+    }
+  } catch (_) {}
+
+  try {
+    if (navigator.setAppBadge) {
+      const set = navigator.setAppBadge.bind(navigator);
+      const clear = navigator.clearAppBadge ? navigator.clearAppBadge.bind(navigator) : null;
+      navigator.setAppBadge = (n) => {
+        post('badge', { n: typeof n === 'number' ? n : 1 });
+        return set(n).catch(() => {});
+      };
+      if (clear) navigator.clearAppBadge = () => { post('badge', { n: 0 }); return clear().catch(() => {}); };
+    }
+  } catch (_) {}
+})();`;
+
+try { webFrame.executeJavaScript(MAIN_WORLD_HOOK); } catch (_) {}
+document.addEventListener('DOMContentLoaded', () => { try { webFrame.executeJavaScript(MAIN_WORLD_HOOK); } catch (_) {} });
+
+window.addEventListener('message', (e) => {
+  if (e.source !== window) return;
+  const d = e.data;
+  if (!d || typeof d !== 'object' || !d.__gigi) return;
+  if (d.__gigi === 'notify') send('notify', d.data || {});
+  else if (d.__gigi === 'badge') send('badge', d.data && Number(d.data.n) >= 0 ? Number(d.data.n) : 0);
+});

@@ -8,6 +8,7 @@ const servicesEl = document.getElementById('services');
 const webviewsEl = document.getElementById('webviews');
 const emptyEl = document.getElementById('empty');
 const groupBtn = document.getElementById('groupBtn');
+const groupDot = document.getElementById('groupDot');
 
 const dialog = document.getElementById('dialog');
 const form = document.getElementById('svcForm');
@@ -27,8 +28,41 @@ const dndBtn = document.getElementById('dndBtn');
 // config = { version, activeGroupId,
 //            groups: [{ id, name, icon?, activeServiceId?, services:[{id,name,url,shared}] }] }
 let config = { version: 2, activeGroupId: null, groups: [] };
-const unread = new Map();          // serviceId -> count
-const views = new Map();           // serviceId -> { webview, button, partition, iconUrl }
+const views = new Map();           // serviceId -> { webview, button, partition, url, iconUrl }
+
+// Unread counts per service, from the site's own signals. Priority:
+//   1. badge — what the site sets with navigator.setAppBadge (exact)
+//   2. title — the number in its tab title, e.g. "(3) WhatsApp" (exact)
+//   3. notif — notifications since you last looked (estimate, for sites with neither)
+// Once a site has shown a badge/title count, we trust that source (0 = read).
+const counts = new Map();          // serviceId -> { badge, badgeSeen, title, titleSeen, notif }
+
+function countState(id) {
+  let c = counts.get(id);
+  if (!c) { c = { badge: 0, badgeSeen: false, title: null, titleSeen: false, notif: 0 }; counts.set(id, c); }
+  return c;
+}
+function unreadOf(id) {
+  const c = counts.get(id);
+  if (!c) return 0;
+  if (c.badgeSeen) return c.badge || 0;
+  if (c.titleSeen) return c.title || 0;
+  return c.notif;
+}
+function findService(id) {
+  for (const g of config.groups) { const s = g.services.find((x) => x.id === id); if (s) return s; }
+  return null;
+}
+// Is the user looking at this service right now?
+function isViewing(id) {
+  const g = activeGroup();
+  return !!g && g.activeServiceId === id && document.hasFocus() && !document.hidden;
+}
+function markSeen(id) {
+  if (!id) return;
+  const c = counts.get(id);
+  if (c && c.notif) { c.notif = 0; refreshBadges(); }
+}
 let editingId = null;              // service id being edited, or null
 let groupEditId = null;            // group id being renamed, or null (null = create)
 let groupIconDraft;               // dialog's pending icon: undefined=unchanged, null=remove, string=new
@@ -120,17 +154,27 @@ function createView(svc, partition) {
     if (url) setButtonIcon(svc.id, url);
   });
   webview.addEventListener('ipc-message', (e) => {
-    const activeId = activeGroup().activeServiceId;
-    const alerts = !config.dnd && !svc.muted; // GiGi's own taskbar flash
-    if (e.channel === 'unread') {
-      const prev = unread.get(svc.id) || 0;
-      const now = e.args[0] || 0;
-      unread.set(svc.id, now);
-      if (alerts && now > prev && (svc.id !== activeId || !document.hasFocus())) window.hub.flash();
-      refreshBadges();
+    const id = svc.id;
+    const c = countState(id);
+    const before = unreadOf(id);
+    if (e.channel === 'title') {
+      const n = e.args[0];
+      c.title = (typeof n === 'number') ? n : null;
+      if (c.title !== null) c.titleSeen = true;
+    } else if (e.channel === 'badge') {
+      c.badge = Number(e.args[0]) || 0;
+      c.badgeSeen = true;
     } else if (e.channel === 'notify') {
-      if (alerts && (svc.id !== activeId || !document.hasFocus())) window.hub.flash();
+      if (!isViewing(id)) c.notif += 1;
+    } else {
+      return;
     }
+    // Read the live service (config may have been replaced since this view was made).
+    const live = findService(id);
+    const alerts = !config.dnd && !(live && live.muted);
+    const grew = unreadOf(id) > before || e.channel === 'notify';
+    if (alerts && grew && !isViewing(id)) window.hub.flash();
+    refreshBadges();
   });
 
   const button = document.createElement('button');
@@ -152,7 +196,7 @@ function createView(svc, partition) {
     if (dragId && editingAllowed() && dragId !== svc.id) reorderService(dragId, svc.id);
   });
 
-  const entry = { webview, button, partition };
+  const entry = { webview, button, partition, url: svc.url };
   views.set(svc.id, entry);
   webviewsEl.appendChild(webview);
   return entry;
@@ -168,9 +212,8 @@ function render() {
   }
   const g = activeGroup();
 
-  // Group button (custom image or letter).
+  // Group button (custom image or letter). Its title is set in refreshBadges.
   paintGroupIcon(groupBtn, g);
-  groupBtn.title = `Group: ${g.name}`;
 
   // Resolve + remember the active service for this group (persisted on config).
   const ids = g.services.map((s) => s.id);
@@ -179,25 +222,30 @@ function render() {
   }
   const activeId = g.activeServiceId;
 
-  // Sidebar buttons for this group's services.
-  servicesEl.innerHTML = '';
-  g.services.forEach((svc) => {
+  // Keep a live webview for every service in every group, so unread counts and
+  // notifications keep working for groups you aren't looking at.
+  config.groups.forEach((gr) => gr.services.forEach((svc) => {
     let entry = views.get(svc.id);
-    const partition = partitionFor(svc, g);
+    const partition = partitionFor(svc, gr);
     if (entry && entry.partition !== partition) { dropView(svc.id); entry = null; }
     if (!entry) entry = createView(svc, partition);
-    entry.button.title = svc.name;
+    // The URL was changed (here or by someone else) → load the new address.
+    if (entry.url !== svc.url) { entry.url = svc.url; entry.webview.setAttribute('src', svc.url); }
+  }));
+
+  // Sidebar buttons for the active group only.
+  servicesEl.innerHTML = '';
+  g.services.forEach((svc) => {
+    const entry = views.get(svc.id);
     paintButton(svc, entry.button, activeId);
     servicesEl.appendChild(entry.button);
   });
 
   // Visibility + cleanup of webviews that no longer belong to any group.
   const allIds = new Set(config.groups.flatMap((gr) => gr.services.map((s) => s.id)));
-  const activeSet = new Set(ids);
   for (const id of [...views.keys()]) {
-    if (!allIds.has(id)) { dropView(id); unread.delete(id); continue; }
-    const entry = views.get(id);
-    entry.webview.classList.toggle('hidden', !(activeSet.has(id) && id === activeId));
+    if (!allIds.has(id)) { dropView(id); counts.delete(id); continue; }
+    views.get(id).webview.classList.toggle('hidden', id !== activeId);
   }
 
   emptyEl.classList.toggle('hidden', g.services.length > 0);
@@ -225,6 +273,14 @@ function paintButton(svc, button, activeId) {
   badge.className = 'badge hidden';
   button.appendChild(badge);
 
+  if (svc.muted) {
+    const mark = document.createElement('span');
+    mark.className = 'mute-mark';
+    mark.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6h2.5L9 3v10L5.5 10H3z" fill="currentColor"/><path d="M11 6l4 4M15 6l-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+    button.appendChild(mark);
+  }
+
+  button.title = svc.name + (svc.muted ? ' — muted on this device' : '');
   button.classList.toggle('shared', !!svc.shared);
   button.classList.toggle('muted', !!svc.muted);
   button.classList.toggle('active', svc.id === activeId);
@@ -243,19 +299,34 @@ function setButtonIcon(id, url) {
   }
 }
 
+const fmtCount = (n) => (n > 99 ? '99+' : String(n));
+const groupUnread = (g) => g.services.reduce((sum, s) => sum + unreadOf(s.id), 0);
+
 function refreshBadges() {
-  const g = activeGroup();
+  const ag = activeGroup();
+  if (!ag) return;
   let total = 0;
-  g.services.forEach((svc) => {
-    const n = unread.get(svc.id) || 0;
+  let elsewhere = 0;
+  config.groups.forEach((g) => {
+    const n = groupUnread(g);
     total += n;
+    if (g.id !== ag.id) elsewhere += n;
+  });
+
+  ag.services.forEach((svc) => {
     const entry = views.get(svc.id);
-    if (!entry) return;
-    const badge = entry.button.querySelector('.badge');
+    const badge = entry && entry.button.querySelector('.badge');
     if (!badge) return;
-    if (n > 0) { badge.textContent = n > 99 ? '99+' : String(n); badge.classList.remove('hidden'); }
+    const n = unreadOf(svc.id);
+    if (n > 0) { badge.textContent = fmtCount(n); badge.classList.remove('hidden'); }
     else badge.classList.add('hidden');
   });
+
+  // Unread waiting in other groups shows on the group button.
+  groupDot.textContent = fmtCount(elsewhere);
+  groupDot.classList.toggle('hidden', elsewhere === 0);
+  groupBtn.title = `Group: ${ag.name}` + (elsewhere ? ` — ${elsewhere} unread in other groups` : '');
+
   window.hub.setBadge(total);
 }
 
@@ -263,13 +334,18 @@ function activate(id) {
   activeGroup().activeServiceId = id;
   persist();           // remember the open tab across restarts
   render();
+  if (document.hasFocus()) markSeen(id);
 }
 
 function setActiveGroup(gid) {
   config.activeGroupId = gid;
   persist();           // remember the chosen group across restarts
   render();
+  if (document.hasFocus()) markSeen(activeGroup().activeServiceId);
 }
+
+// Coming back to the window counts as looking at the open service.
+window.addEventListener('focus', () => { const g = activeGroup(); if (g) markSeen(g.activeServiceId); });
 
 // ---- Popup menu (service + group) -------------------------------------------
 let menu = document.getElementById('menu');
@@ -310,9 +386,10 @@ function showServiceMenu(x, y, id) {
   const canEdit = editingAllowed();
 
   // Reload and Mute are local (always available); the rest change the shared setup.
+  // Mute only affects this device — others using the same profile still get alerts.
   const items = [
     { label: 'Reload', fn: () => { const v = views.get(id); if (v) v.webview.reload(); } },
-    { label: svc.muted ? 'Unmute notifications' : 'Mute notifications', fn: () => {
+    { label: svc.muted ? 'Unmute on this device' : 'Mute on this device', fn: () => {
         svc.muted = !svc.muted; persist(); render();
       } }
   ];
@@ -380,7 +457,8 @@ function showGroupMenu() {
   const r = groupBtn.getBoundingClientRect();
   const items = [];
   config.groups.forEach((g) => {
-    items.push({ label: g.name, checked: g.id === config.activeGroupId, fn: () => setActiveGroup(g.id) });
+    const n = groupUnread(g);
+    items.push({ label: n ? `${g.name} (${fmtCount(n)})` : g.name, checked: g.id === config.activeGroupId, fn: () => setActiveGroup(g.id) });
   });
   items.push({ sep: true });
   if (editingAllowed()) {
@@ -530,12 +608,7 @@ form.addEventListener('submit', (e) => {
     const svc = g.services.find((s) => s.id === editingId);
     const before = partitionFor(svc, g);
     svc.name = name; svc.url = url; svc.shared = shared;
-    if (partitionFor(svc, g) !== before) {
-      dropView(svc.id);
-    } else {
-      const entry = views.get(svc.id);
-      if (entry && entry.webview.getAttribute('src') !== url) entry.webview.setAttribute('src', url);
-    }
+    if (partitionFor(svc, g) !== before) dropView(svc.id); // new login jar → rebuild (render loads the URL)
   } else {
     g.services.push({ id: uid(), name, url, shared });
   }
@@ -660,28 +733,46 @@ document.getElementById('emptyAdd').addEventListener('click', () => { if (editin
 // ---- Boot -------------------------------------------------------------------
 function normalizeConfig(cfg) {
   if (!cfg || !Array.isArray(cfg.groups)) cfg = { version: 2, activeGroupId: null, groups: [] };
+  cfg._rev = Number(cfg._rev) || 0;       // which shared version this view is based on
   cfg.dnd = !!cfg.dnd;
-  cfg.templateVersion = cfg.templateVersion || 0;
   cfg.pinHash = cfg.pinHash || null;      // shared: whether an admin PIN is set
   cfg._unlocked = !!cfg._unlocked;        // local: did this device enter the PIN
   cfg.groups.forEach((g) => {
     g.id = g.id || uid('g');
     g.name = g.name || 'Group';
     g.icon = g.icon || null;
-    g.tpl = !!g.tpl;
     g.services = (g.services || []).map((s) => ({
-      id: s.id || uid(), name: s.name, url: s.url, shared: !!s.shared, muted: !!s.muted, tpl: !!s.tpl
+      id: s.id || uid(), name: s.name, url: s.url, shared: !!s.shared, muted: !!s.muted
     }));
     if (g.activeServiceId && !g.services.some((s) => s.id === g.activeServiceId)) g.activeServiceId = null;
   });
   return cfg;
 }
 
-// When the shared template is fetched or the owner publishes an update, main
-// sends the merged config here so the rail refreshes without a restart.
-window.hub.onConfigUpdated((newCfg) => {
-  if (!newCfg) return;
-  config = normalizeConfig(newCfg);
+// A shared-setup update arrived (another device edited, or main merged our own
+// save). Adopt the shared structure only — this device's open tab, active group,
+// mutes, Do Not Disturb and unlock stay exactly as they are here, so nothing
+// jumps to a different profile.
+window.hub.onConfigUpdated((incoming) => {
+  if (!incoming) return;
+  const next = normalizeConfig(incoming);
+  const prevGroups = new Map(config.groups.map((g) => [g.id, g]));
+  const muted = new Set();
+  config.groups.forEach((g) => g.services.forEach((s) => { if (s.muted) muted.add(s.id); }));
+
+  next.groups.forEach((g) => {
+    const prev = prevGroups.get(g.id);
+    if (prev && prev.activeServiceId && g.services.some((s) => s.id === prev.activeServiceId)) {
+      g.activeServiceId = prev.activeServiceId;
+    }
+    g.services.forEach((s) => { s.muted = muted.has(s.id); });
+  });
+  if (config.groups.length) {
+    next.activeGroupId = config.activeGroupId;
+    next.dnd = config.dnd;
+    next._unlocked = config._unlocked;
+  }
+  config = next;
   render();
 });
 

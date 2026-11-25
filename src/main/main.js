@@ -3,6 +3,8 @@
 const { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, dialog, session, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { StringDecoder } = require('string_decoder');
+const core = require('./sync-core');
 
 // ---- Paths & storage (everything stays local) --------------------------------
 const CONFIG_FILE = path.join(app.getPath('userData'), 'services.json');
@@ -87,7 +89,6 @@ function loadConfig() {
   return {
     version: 2,
     activeGroupId: 'g_default',
-    templateVersion: 0,
     groups: [{ id: 'g_default', name: 'Default', services: [] }]
   };
 }
@@ -102,9 +103,12 @@ function fetchRemoteTemplate() {
       const timer = setTimeout(() => { try { req.abort(); } catch (_) {} done(null); }, 8000);
       req.on('response', (res) => {
         if (res.statusCode < 200 || res.statusCode >= 300) { clearTimeout(timer); done(null); return; }
-        let data = '';
-        res.on('data', (c) => { data += c; });
-        res.on('end', () => { clearTimeout(timer); try { done(JSON.parse(data)); } catch (_) { done(null); } });
+        const chunks = [];
+        res.on('data', (c) => { chunks.push(Buffer.from(c)); });
+        res.on('end', () => {
+          clearTimeout(timer);
+          try { done(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch (_) { done(null); }
+        });
       });
       req.on('error', () => { clearTimeout(timer); done(null); });
       req.end();
@@ -113,134 +117,178 @@ function fetchRemoteTemplate() {
 }
 
 // ---- Two-way shared sync (Firebase Realtime Database via REST) ---------------
-// Everyone reads AND writes one shared setup, so any user's added/renamed/removed
-// group or service shows up for everyone. Only the shared STRUCTURE syncs; each
-// user's active tab, Do Not Disturb and per-tab mute stay local, and logins
-// (sessions) are always local to each machine.
-const CLOUD_NODE = 'https://gigi-9fd87-default-rtdb.asia-southeast1.firebasedatabase.app/config.json';
+// Everyone reads AND writes one shared setup. The cloud stores groups/services
+// keyed by id, and each device sends only what it changed (a multi-path PATCH),
+// so two people editing at once — or someone coming back online after editing
+// offline — merge instead of overwriting each other. Only the shared structure
+// syncs; each device's open tab, mute, Do Not Disturb and logins stay local.
+const CLOUD_ROOT = 'https://gigi-9fd87-default-rtdb.asia-southeast1.firebasedatabase.app';
+const SHARED_URL = CLOUD_ROOT + '/' + (process.env.GIGI_SHARED_PATH || 'shared').replace(/^\/+/, '') + '.json';
+const LEGACY_URL = CLOUD_ROOT + '/config.json'; // whole-document format used by v1.0.9–1.0.11
+const CLOUD_BASE_FILE = path.join(app.getPath('userData'), 'cloud-base.json');
+const SYNC_LOG = path.join(app.getPath('userData'), 'sync.log');
 
-let lastSharedJson = null; // the shared structure we last pushed or pulled
-
-// The subset of the config that is shared with everyone (the setup + the admin
-// PIN hash, if one is set). Local-only state (active tab, mute, DND, unlock) is
-// never shared.
-function sharedView(config) {
-  return {
-    pinHash: config.pinHash || null,
-    groups: (config.groups || []).map((g) => ({
-      id: g.id, name: g.name, icon: g.icon || null,
-      services: (g.services || []).map((s) => ({ id: s.id, name: s.name, url: s.url, shared: !!s.shared }))
-    }))
-  };
+// Small rolling log of sync problems, so issues reported by users can be diagnosed.
+function syncLog(msg) {
+  try {
+    if (fs.existsSync(SYNC_LOG) && fs.statSync(SYNC_LOG).size > 200 * 1024) fs.renameSync(SYNC_LOG, SYNC_LOG + '.old');
+    fs.appendFileSync(SYNC_LOG, new Date().toISOString() + ' ' + msg + '\n');
+  } catch (_) {}
 }
-// Canonical JSON of the shared structure. Firebase drops empty arrays and null
-// fields, so we normalize both sides before comparing to avoid false "changed".
-const structJson = (shared) => JSON.stringify({
-  pinHash: (shared && shared.pinHash) || null,
-  groups: ((shared && shared.groups) || []).map((g) => ({
-    id: g.id, name: g.name, icon: g.icon || null,
-    services: (g.services || []).map((s) => ({ id: s.id, name: s.name, url: s.url, shared: !!s.shared }))
-  }))
-});
 
-function cloudRequest(method, body) {
+// Last cloud state this device has seen. Local edits are diffed against it; it
+// is kept on disk so offline edits still merge correctly after a restart.
+let base = null;
+
+function loadBase() {
+  try { base = core.canonMap(JSON.parse(fs.readFileSync(CLOUD_BASE_FILE, 'utf8'))); } catch (_) { base = null; }
+}
+function setBase(map) {
+  base = map;
+  try {
+    fs.writeFileSync(CLOUD_BASE_FILE + '.tmp', JSON.stringify(map));
+    fs.renameSync(CLOUD_BASE_FILE + '.tmp', CLOUD_BASE_FILE);
+  } catch (err) { console.error('Failed to save cloud base:', err); }
+}
+
+function cloudRequest(method, url, body) {
   return new Promise((resolve) => {
     let settled = false;
     const done = (v) => { if (!settled) { settled = true; resolve(v); } };
     try {
-      const req = net.request({ method, url: CLOUD_NODE });
-      const timer = setTimeout(() => { try { req.abort(); } catch (_) {} done(null); }, 8000);
+      const req = net.request({ method, url });
+      const timer = setTimeout(() => { try { req.abort(); } catch (_) {} done({ ok: false }); }, 10000);
       req.on('response', (res) => {
-        let data = '';
-        res.on('data', (c) => { data += c; });
+        const chunks = [];
+        res.on('data', (c) => { chunks.push(Buffer.from(c)); });
         res.on('end', () => {
           clearTimeout(timer);
-          if (res.statusCode < 200 || res.statusCode >= 300) { done(null); return; }
-          try { done(data ? JSON.parse(data) : null); } catch (_) { done(null); }
+          if (res.statusCode < 200 || res.statusCode >= 300) { done({ ok: false }); return; }
+          const text = Buffer.concat(chunks).toString('utf8');
+          try { done({ ok: true, data: text ? JSON.parse(text) : null }); } catch (_) { done({ ok: false }); }
         });
       });
-      req.on('error', () => { clearTimeout(timer); done(null); });
-      if (body !== undefined) { req.setHeader('Content-Type', 'application/json'); req.write(JSON.stringify(body)); }
+      req.on('error', () => { clearTimeout(timer); done({ ok: false }); });
+      if (body !== undefined) {
+        req.setHeader('Content-Type', 'application/json');
+        req.write(Buffer.from(JSON.stringify(body), 'utf8'));
+      }
       req.end();
-    } catch (_) { done(null); }
+    } catch (_) { done({ ok: false }); }
   });
 }
-const fetchCloud = () => cloudRequest('GET');
-const pushCloud = (shared) => cloudRequest('PUT', shared);
 
-// Replace the local config's shared structure with the cloud's, keeping each
-// user's local-only state (active tab, per-tab mute).
-function applySharedToLocal(local, shared) {
-  local.pinHash = shared.pinHash || null;
-  const muted = new Set();
-  (local.groups || []).forEach((g) => (g.services || []).forEach((s) => { if (s.muted) muted.add(s.id); }));
-  local.groups = (shared.groups || []).map((g) => ({
-    id: g.id, name: g.name, icon: g.icon || null,
-    services: (g.services || []).map((s) => ({
-      id: s.id, name: s.name, url: s.url, shared: !!s.shared, muted: muted.has(s.id)
-    }))
-  }));
-  if (!local.groups.length) local.groups.push({ id: 'g_default', name: 'Default', services: [] });
+// Every pull/push runs one at a time, so they can never interleave.
+let chain = Promise.resolve();
+function enqueue(task) {
+  chain = chain.then(task).catch((err) => syncLog('sync task failed: ' + (err && err.stack || err)));
+  return chain;
 }
 
-// Pull the shared setup; seed the cloud the first time it is empty.
-async function syncFromCloud() {
-  const cloud = await fetchCloud();
+// The renderer's view of the config is versioned. A save based on an older
+// version is merged (its own edits re-applied on top) instead of overwriting
+// changes that arrived from other devices in the meantime.
+let rev = 0;
+const sentSnapshots = new Map(); // rev -> shared map the renderer was given
 
-  if (!cloud || !Array.isArray(cloud.groups) || !cloud.groups.length) {
-    let seed = sharedView(currentConfig);
-    if (!seed.groups.length || !seed.groups.some((g) => g.services.length)) {
-      const tpl = await fetchRemoteTemplate();          // GitHub starter template
-      if (tpl && Array.isArray(tpl.groups)) seed = sharedView(tpl);
-    }
-    if (seed.groups.length && lastSharedJson === null) {
-      await pushCloud(seed);
-      lastSharedJson = structJson(seed);
-    }
-    return;
+function rememberSnapshot() {
+  sentSnapshots.set(rev, core.toMap(currentConfig));
+  while (sentSnapshots.size > 30) sentSnapshots.delete(sentSnapshots.keys().next().value);
+}
+function sendToRenderer() {
+  rev += 1;
+  rememberSnapshot();
+  if (win && !win.isDestroyed()) win.webContents.send('config:updated', { ...currentConfig, _rev: rev });
+}
+
+// Push this device's unsent edits (diff against the last-seen cloud state).
+async function pushLocal(extraDeletes = []) {
+  if (!base) return;
+  const up = core.diffMaps(base, core.toMap(currentConfig));
+  extraDeletes.forEach((gid) => { up['groups/' + gid] = null; });
+  if (!Object.keys(up).length) return;
+  const res = await cloudRequest('PATCH', SHARED_URL, up);
+  if (res.ok) setBase(core.applyUpdates(base, up));
+  else syncLog('push failed, will retry: ' + Object.keys(up).join(', '));
+}
+
+// Pull the shared setup and merge: cloud state + this device's unsent edits.
+async function pullCloud() {
+  const res = await cloudRequest('GET', SHARED_URL);
+  if (!res.ok) return; // offline — keep working locally, retry later
+  const raw = res.data;
+  if (!raw || !raw.groups || !Object.keys(raw.groups).length) { await seedCloud(); return; }
+
+  const cloud = core.canonMap(raw);
+  const ghosts = core.ghostGroupIds(raw);
+  const local = core.toMap(currentConfig);
+  const pending = base ? core.diffMaps(base, local) : {}; // first sync on this device: adopt the cloud
+  const merged = core.applyUpdates(cloud, pending);
+  setBase(cloud);
+
+  if (core.stableJson(merged) !== core.stableJson(local)) {
+    currentConfig = core.withLocalState(core.fromMap(merged), currentConfig);
+    saveConfig(currentConfig);
+    sendToRenderer();
   }
-
-  const cloudJson = structJson(cloud);
-  if (cloudJson === lastSharedJson) return; // nothing new since our last sync
-
-  applySharedToLocal(currentConfig, cloud);   // someone changed it → adopt it
-  lastSharedJson = cloudJson;
-  saveConfig(currentConfig);
-  if (win && !win.isDestroyed()) win.webContents.send('config:updated', currentConfig);
+  if (Object.keys(pending).length || ghosts.length) await pushLocal(ghosts);
 }
 
-// After a local edit: push to everyone only when the shared structure changed
-// (not for a tab switch, a mute, or Do Not Disturb — those stay local).
-function pushIfChanged() {
-  const json = structJson(sharedView(currentConfig));
-  if (json === lastSharedJson) return;
-  lastSharedJson = json;
-  pushCloud(sharedView(currentConfig));
+// First time the shared node is empty: seed it from the old whole-document
+// cloud data, else this device's setup, else the GitHub starter template.
+async function seedCloud() {
+  let map = null;
+  const legacy = await cloudRequest('GET', LEGACY_URL);
+  if (legacy.ok && legacy.data && Array.isArray(legacy.data.groups) && legacy.data.groups.length) {
+    map = core.canonMap(core.toMap({ pinHash: legacy.data.pinHash, groups: legacy.data.groups }));
+  }
+  if (!map || !Object.keys(map.groups).length) {
+    const local = core.canonMap(core.toMap(currentConfig));
+    if (Object.values(local.groups).some((g) => Object.keys(g.services).length)) map = local;
+  }
+  if (!map || !Object.keys(map.groups).length) {
+    const tpl = await fetchRemoteTemplate();
+    if (tpl && Array.isArray(tpl.groups)) map = core.canonMap(core.toMap(tpl));
+  }
+  if (!map || !Object.keys(map.groups).length) return;
+
+  // Another device may have seeded in the meantime — never overwrite it.
+  const again = await cloudRequest('GET', SHARED_URL);
+  if (!again.ok) return;
+  if (again.data && again.data.groups && Object.keys(again.data.groups).length) { await pullCloud(); return; }
+
+  const put = await cloudRequest('PUT', SHARED_URL, map);
+  if (!put.ok) return;
+  setBase(map);
+  currentConfig = core.withLocalState(core.fromMap(map), currentConfig);
+  saveConfig(currentConfig);
+  sendToRenderer();
 }
 
 // Debounce so a burst of stream events triggers a single pull.
 let syncTimer = null;
 function scheduleSync() {
   if (syncTimer) return;
-  syncTimer = setTimeout(() => { syncTimer = null; syncFromCloud(); }, 250);
+  syncTimer = setTimeout(() => { syncTimer = null; enqueue(pullCloud); }, 250);
 }
 
-// Realtime: hold an EventSource-style stream open to Firebase; any change pings
-// us to pull immediately. Reconnects on drop; the periodic poll is a fallback.
+// Realtime: hold an EventSource stream open to Firebase; any change pings us to
+// pull immediately. Reconnects on drop; the periodic poll is a fallback.
 let streamReq = null;
 function startRealtime() {
   try {
     if (streamReq) { try { streamReq.abort(); } catch (_) {} }
-    const req = net.request({ method: 'GET', url: CLOUD_NODE });
+    const req = net.request({ method: 'GET', url: SHARED_URL });
     req.setHeader('Accept', 'text/event-stream');
     streamReq = req;
+    const decoder = new StringDecoder('utf8');
     let buffer = '';
     let lastEvent = '';
     const reconnect = () => { if (streamReq === req) { streamReq = null; setTimeout(startRealtime, 3000); } };
     req.on('response', (res) => {
       if (res.statusCode < 200 || res.statusCode >= 300) { reconnect(); return; }
       res.on('data', (chunk) => {
-        buffer += chunk.toString();
+        buffer += decoder.write(Buffer.from(chunk));
         let nl;
         while ((nl = buffer.indexOf('\n')) >= 0) {
           const line = buffer.slice(0, nl); buffer = buffer.slice(nl + 1);
@@ -397,11 +445,34 @@ ipcMain.handle('settings:set-login', (_e, enable) => {
   try { app.setLoginItemSettings({ openAtLogin: !!enable }); return true; } catch (_) { return false; }
 });
 
-ipcMain.handle('config:get', () => currentConfig || (currentConfig = loadConfig()));
-ipcMain.handle('config:save', (_e, config) => {
-  currentConfig = config;
-  const ok = saveConfig(config);
-  pushIfChanged(); // share structural edits with everyone
+ipcMain.handle('config:get', () => {
+  if (!currentConfig) currentConfig = loadConfig();
+  rememberSnapshot();
+  return { ...currentConfig, _rev: rev };
+});
+
+ipcMain.handle('config:save', (_e, incoming) => {
+  if (!incoming || !Array.isArray(incoming.groups)) return false;
+  const inRev = Number(incoming._rev) || 0;
+  const stale = inRev !== rev;
+
+  let structure;
+  if (!stale) {
+    structure = core.fromMap(core.toMap(incoming));
+  } else {
+    // The renderer edited an older version: re-apply only its own changes on
+    // top of the newest state, so remote edits that arrived meanwhile survive.
+    const snap = sentSnapshots.get(inRev);
+    const current = core.toMap(currentConfig);
+    structure = core.fromMap(snap ? core.applyUpdates(current, core.diffMaps(snap, core.toMap(incoming))) : current);
+  }
+
+  // This device's own state (open tab, mute, DND, unlock) always comes from the renderer.
+  currentConfig = core.withLocalState(structure, incoming);
+  const ok = saveConfig(currentConfig);
+  enqueue(() => pushLocal()); // share structural edits with everyone
+  if (stale) sendToRenderer(); // bring the renderer up to date
+  else rememberSnapshot();
   return ok;
 });
 
@@ -475,15 +546,16 @@ if (!app.requestSingleInstanceLock()) {
 
     // Load local config now (fast, offline-safe); the shared cloud syncs after.
     currentConfig = loadConfig();
+    loadBase();
 
     wireWebContents();
     createWindow();
     createTray();
     initUpdater();
 
-    syncFromCloud();                               // pull the shared setup now
-    startRealtime();                               // live updates (instant)
-    setInterval(syncFromCloud, 30000);            // fallback poll if the stream drops
+    enqueue(pullCloud);                                 // pull the shared setup now
+    startRealtime();                                    // live updates (instant)
+    setInterval(() => enqueue(pullCloud), 30000);      // fallback poll / retry unsent edits
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
