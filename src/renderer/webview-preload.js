@@ -5,7 +5,7 @@
 //   'title'  — a count the site puts in its tab title, e.g. "(3) WhatsApp" (null if none)
 //   'badge'  — a count the site sets with navigator.setAppBadge() (most exact)
 //   'notify' — the site showed a notification (fallback for sites with no count)
-// Notifications still go through normally.
+// Notifications still go through normally, unless the tab is muted here.
 
 const { ipcRenderer, webFrame } = require('electron');
 
@@ -52,8 +52,15 @@ const MAIN_WORLD_HOOK = `(() => {
   try {
     const N = window.Notification;
     if (N) {
+      // Muted on this device: count it, but show no toast and play no sound.
+      const silent = () => {
+        const t = new EventTarget();
+        t.close = () => {}; t.onclick = null; t.onclose = null; t.onerror = null; t.onshow = null;
+        return t;
+      };
       const Wrapped = function (title, options) {
         post('notify', { title: String(title || '') });
+        if (window.__gigiMuted) return silent();
         return new N(title, options);
       };
       Wrapped.prototype = N.prototype;
@@ -70,6 +77,7 @@ const MAIN_WORLD_HOOK = `(() => {
       const original = proto.showNotification;
       proto.showNotification = function (title, options) {
         post('notify', { title: String(title || '') });
+        if (window.__gigiMuted) return Promise.resolve();
         return original.call(this, title, options);
       };
     }
@@ -90,6 +98,14 @@ const MAIN_WORLD_HOOK = `(() => {
 
 try { webFrame.executeJavaScript(MAIN_WORLD_HOOK); } catch (_) {}
 document.addEventListener('DOMContentLoaded', () => { try { webFrame.executeJavaScript(MAIN_WORLD_HOOK); } catch (_) {} });
+
+// The host tells us whether this tab is muted on this device (sent on every
+// page load). The flag lives in the page's main world, where the hook reads it.
+let muted = false;
+function applyMuted() {
+  try { webFrame.executeJavaScript('window.__gigiMuted = ' + (muted ? 'true' : 'false') + ';'); } catch (_) {}
+}
+ipcRenderer.on('gigi:mute', (_e, m) => { muted = !!m; applyMuted(); });
 
 window.addEventListener('message', (e) => {
   if (e.source !== window) return;

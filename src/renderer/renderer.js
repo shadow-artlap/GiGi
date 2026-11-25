@@ -108,12 +108,29 @@ async function persist() {
 
 // Tell main which partitions must have notifications blocked (muted tabs, or all
 // tabs while Do Not Disturb is on). This silences the OS toast + sound at source.
+// A Shared partition is used by several tabs, so it is only blocked when every
+// tab on it is silenced; each tab's own page sound is muted separately below.
 function syncNotifyBlocks() {
-  const blocked = [];
+  const state = new Map(); // partition -> all tabs on it silenced?
   config.groups.forEach((g) => g.services.forEach((svc) => {
-    if (config.dnd || svc.muted) blocked.push(partitionFor(svc, g));
+    const p = partitionFor(svc, g);
+    const silenced = !!(config.dnd || svc.muted);
+    state.set(p, state.has(p) ? state.get(p) && silenced : silenced);
   }));
-  window.hub.setNotifyBlock(blocked);
+  window.hub.setNotifyBlock([...state].filter(([, b]) => b).map(([p]) => p));
+  config.groups.forEach((g) => g.services.forEach((svc) => applySilence(svc.id)));
+}
+
+// Chat sites (Messenger, WhatsApp, LINE…) play their own "ding" inside the page,
+// which no notification permission can stop. So a muted tab (or every tab during
+// Do Not Disturb) also has its page audio muted, and its notifications dropped.
+function applySilence(id) {
+  const entry = views.get(id);
+  if (!entry || !entry.ready) return;
+  const svc = findService(id);
+  const silenced = !!(config.dnd || (svc && svc.muted));
+  try { entry.webview.setAudioMuted(silenced); } catch (_) {}
+  try { entry.webview.send('gigi:mute', silenced); } catch (_) {}
 }
 
 function paintDnd() {
@@ -149,6 +166,11 @@ function createView(svc, partition) {
   webview.setAttribute('useragent',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
+  // Re-apply mute after every page load (each load starts unmuted).
+  webview.addEventListener('dom-ready', () => {
+    const entry = views.get(svc.id);
+    if (entry && entry.webview === webview) { entry.ready = true; applySilence(svc.id); }
+  });
   webview.addEventListener('page-favicon-updated', (e) => {
     const url = e.favicons && e.favicons[0];
     if (url) setButtonIcon(svc.id, url);
